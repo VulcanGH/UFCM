@@ -1,0 +1,352 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package torznab
+
+import (
+	"bytes"
+	"context"
+	"encoding/xml"
+	"io"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/autobrr/autobrr/internal/meta"
+	"github.com/autobrr/autobrr/pkg/errors"
+	"github.com/autobrr/autobrr/pkg/sharedhttp"
+
+	"github.com/rs/zerolog"
+)
+
+type Client struct {
+	http      *http.Client
+	userAgent string
+
+	Host   string
+	ApiKey string
+
+	UseBasicAuth bool
+	BasicAuth    BasicAuth
+
+	Capabilities *Caps
+
+	log   zerolog.Logger
+	Debug bool
+}
+
+func (c *Client) WithHTTPClient(client *http.Client) {
+	c.http = client
+}
+
+func (c *Client) WithDebug() {
+	c.Debug = true
+}
+
+type BasicAuth struct {
+	Username string
+	Password string
+}
+
+type Config struct {
+	Host    string
+	ApiKey  string
+	Timeout time.Duration
+
+	UseBasicAuth  bool
+	BasicAuth     BasicAuth
+	TLSSkipVerify bool
+
+	Log zerolog.Logger
+}
+
+type Capabilities struct {
+	Search     Searching
+	Categories Categories
+}
+
+func NewClient(config Config) *Client {
+	transport := sharedhttp.Transport
+	if config.TLSSkipVerify {
+		transport = sharedhttp.TransportTLSInsecure
+	}
+	httpClient := &http.Client{
+		Timeout:   config.Timeout,
+		Transport: transport,
+	}
+
+	return &Client{
+		http:      httpClient,
+		Host:      config.Host,
+		ApiKey:    config.ApiKey,
+		log:       config.Log,
+		userAgent: meta.GetUserAgent(),
+	}
+}
+
+// mergeQuery merges params into the feed url's query, with params winning on conflicts.
+func mergeQuery(hostQuery string, params url.Values) url.Values {
+	// ParseQuery returns the pairs it could parse alongside the error, so a single
+	// malformed pair doesn't drop the rest of the feed url's params
+	qp, _ := url.ParseQuery(hostQuery)
+
+	for key, values := range params {
+		qp[key] = values
+	}
+
+	return qp
+}
+
+func (c *Client) get(ctx context.Context, params url.Values) (*Feed, error) {
+	if c.ApiKey != "" {
+		params.Add("apikey", url.QueryEscape(c.ApiKey))
+	}
+
+	u, err := url.Parse(c.Host)
+	if err != nil {
+		return nil, err
+	}
+
+	u.Path = strings.TrimSuffix(u.Path, "/")
+	u.RawQuery = mergeQuery(u.RawQuery, params).Encode()
+	reqUrl := u.String()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not build request")
+	}
+
+	if c.UseBasicAuth {
+		req.SetBasicAuth(c.BasicAuth.Username, c.BasicAuth.Password)
+	}
+
+	// Jackett only supports api key via url param while Prowlarr does that and via header
+	//if c.ApiKey != "" {
+	//	req.Header.Add("X-API-Key", c.ApiKey)
+	//}
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not make request. %+v", req)
+	}
+
+	defer sharedhttp.DrainAndClose(resp)
+
+	if c.Debug {
+		dump, err := httputil.DumpResponse(resp, true)
+		if err != nil {
+			return nil, errors.Wrap(err, "could not dump response")
+		}
+
+		c.log.Debug().Str("response", string(dump)).Msg("torznab feed response dump")
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		break
+	case http.StatusUnauthorized:
+		return nil, errors.New("unauthorized")
+	case http.StatusNotFound:
+		return nil, errors.New("not found, make sure the path is correct")
+	default:
+		return nil, errors.New("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var buf bytes.Buffer
+	if _, err = io.Copy(&buf, resp.Body); err != nil {
+		return nil, errors.Wrap(err, "torznab.io.Copy")
+	}
+
+	var response Feed
+	if err := xml.Unmarshal(buf.Bytes(), &response); err != nil {
+		return nil, errors.Wrap(err, "torznab: could not decode feed")
+	}
+
+	response.Raw = buf.String()
+
+	return &response, nil
+}
+
+// defaultSearchLimit is the page size used when caps report no max limit.
+const defaultSearchLimit = 50
+
+// pageLimit returns the page size to request, preferring the caps max limit.
+func (c *Client) pageLimit() int {
+	if c.Capabilities != nil && c.Capabilities.Limits.Max > 0 {
+		return c.Capabilities.Limits.Max
+	}
+
+	return defaultSearchLimit
+}
+
+// FetchFeed fetches the latest items from the feed in a single request.
+func (c *Client) FetchFeed(ctx context.Context) (*Feed, error) {
+	if err := c.getAndSetCaps(ctx); err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	params.Set("t", "search")
+	params.Set("extended", "1")
+	params.Set("limit", strconv.Itoa(c.pageLimit()))
+
+	res, err := c.get(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not get feed")
+	}
+
+	for _, item := range res.Channel.Items {
+		item.MapCategories(c.Capabilities.Categories.Categories)
+	}
+
+	return res, nil
+}
+
+func (c *Client) getCaps(ctx context.Context) (*Caps, error) {
+	params := url.Values{}
+	params.Set("t", "caps")
+
+	if c.ApiKey != "" {
+		params.Add("apikey", url.QueryEscape(c.ApiKey))
+	}
+
+	u, err := url.Parse(c.Host)
+	if err != nil {
+		return nil, err
+	}
+
+	u.Path = strings.TrimSuffix(u.Path, "/")
+	u.RawQuery = mergeQuery(u.RawQuery, params).Encode()
+	reqUrl := u.String()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not build request")
+	}
+
+	if c.UseBasicAuth {
+		req.SetBasicAuth(c.BasicAuth.Username, c.BasicAuth.Password)
+	}
+
+	// Jackett only supports api key via url param while Prowlarr does that and via header
+	//if c.ApiKey != "" {
+	//	req.Header.Add("X-API-Key", c.ApiKey)
+	//}
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not make request. %+v", req)
+	}
+
+	defer sharedhttp.DrainAndClose(resp)
+
+	if c.Debug {
+		dump, err := httputil.DumpResponse(resp, true)
+		if err != nil {
+			return nil, errors.Wrap(err, "could not dump response")
+		}
+
+		c.log.Debug().Str("response", string(dump)).Msg("torznab caps response dump")
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		break
+	case http.StatusUnauthorized:
+		return nil, errors.New("unauthorized")
+	case http.StatusNotFound:
+		return nil, errors.New("not found, make sure the path is correct")
+	default:
+		return nil, errors.New("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var buf bytes.Buffer
+	if _, err = io.Copy(&buf, resp.Body); err != nil {
+		return nil, errors.Wrap(err, "torznab.io.Copy")
+	}
+
+	var response Caps
+	if err := xml.Unmarshal(buf.Bytes(), &response); err != nil {
+		return nil, errors.Wrap(err, "torznab: could not decode feed")
+	}
+
+	return &response, nil
+}
+
+func (c *Client) getAndSetCaps(ctx context.Context) error {
+	if c.Capabilities == nil {
+		caps, err := c.getCaps(ctx)
+		if err != nil {
+			return errors.Wrap(err, "could not get caps for feed")
+		}
+
+		if caps == nil {
+			return errors.New("could not get caps for feed")
+		}
+
+		c.Capabilities = caps
+	}
+
+	return nil
+}
+
+func (c *Client) FetchCaps(ctx context.Context) (*Caps, error) {
+	res, err := c.getCaps(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not get caps for feed")
+	}
+
+	return res, nil
+}
+
+func (c *Client) GetCaps() *Caps {
+	return c.Capabilities
+}
+
+// Search queries the indexer for one page of results starting at offset.
+func (c *Client) Search(ctx context.Context, query string, categories []int, offset int) (*SearchResponse, error) {
+	if err := c.getAndSetCaps(ctx); err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	params.Set("t", "search")
+	if query != "" {
+		params.Add("q", query)
+	}
+	params.Set("extended", "1")
+	params.Set("limit", strconv.Itoa(c.pageLimit()))
+	if offset > 0 {
+		params.Set("offset", strconv.Itoa(offset))
+	}
+
+	cats := make([]string, 0)
+	for _, cat := range categories {
+		cats = append(cats, strconv.Itoa(cat))
+	}
+	params.Add("cat", strings.Join(cats, ","))
+
+	res, err := c.get(ctx, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not search feed")
+	}
+
+	for _, item := range res.Channel.Items {
+		item.MapCategories(c.Capabilities.Categories.Categories)
+	}
+
+	resp := &SearchResponse{
+		Title: res.Channel.Title,
+		Items: res.Channel.Items,
+		Raw:   res.Raw,
+		Limit: c.pageLimit(),
+		Total: res.Channel.Paging.Total,
+	}
+
+	return resp, nil
+}

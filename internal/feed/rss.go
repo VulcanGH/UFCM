@@ -1,0 +1,366 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package feed
+
+import (
+	"cmp"
+	"context"
+	"encoding/xml"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/autobrr/autobrr/internal/domain"
+	"github.com/autobrr/autobrr/pkg/sanitize"
+
+	"github.com/dustin/go-humanize"
+	"github.com/mmcdole/gofeed"
+	"github.com/rs/zerolog"
+)
+
+var (
+	rxpSize      = regexp.MustCompile(`(?mi)(([0-9.]+)\s*(b|kb|kib|kilobyte|mb|mib|megabyte|gb|gib|gigabyte|tb|tib|terabyte))`)
+	rxpFreeleech = regexp.MustCompile(`(?mi)(\bfreeleech\b)`)
+	rxpHTML      = regexp.MustCompile(`(?mi)<.*?>`)
+)
+
+type rssSource struct {
+	log    zerolog.Logger
+	feed   *domain.Feed
+	client *http.Client
+}
+
+func (s *rssSource) fetch(ctx context.Context, _ int) (*fetchResult, error) {
+	feedParser := NewFeedParser(s.client, s.feed.Cookie, s.feed.UserAgent)
+
+	feed, err := feedParser.ParseURLWithContext(ctx, s.feed.URL)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &fetchResult{raw: feed.String(), entries: make([]entry, 0, len(feed.Items)), items: len(feed.Items)}
+
+	for _, item := range feed.Items {
+		e := entry{
+			key:     cmp.Or(item.GUID, item.Link, item.Title),
+			title:   item.Title,
+			release: func() *domain.Release { return s.toRelease(item) },
+		}
+
+		if item.PublishedParsed != nil {
+			e.pubDate = *item.PublishedParsed
+		}
+
+		res.entries = append(res.entries, e)
+	}
+
+	return res, nil
+}
+
+func (s *rssSource) toRelease(item *gofeed.Item) *domain.Release {
+	rls := domain.NewRelease(s.feed.Indexer)
+	rls.Implementation = domain.ReleaseImplementationRSS
+
+	if item.PublishedParsed != nil && !item.PublishedParsed.IsZero() {
+		rls.PublishDate = *item.PublishedParsed
+	}
+
+	rls.ParseString(item.Title)
+
+	if s.feed.Settings != nil && s.feed.Settings.DownloadType == domain.FeedDownloadTypeMagnet {
+		rls.MagnetURI = item.Link
+		rls.DownloadURL = ""
+	}
+
+	for _, e := range item.Enclosures {
+		if e.Type == "application/x-nzb" {
+			if s.feed.Settings != nil && s.feed.Settings.DownloadType != "" && s.feed.Settings.DownloadType != domain.FeedDownloadTypeNzb {
+				continue
+			}
+			if e.URL != "" {
+				rls.DownloadURL = e.URL
+			}
+			if e.Length != "" && e.Length != "1" {
+				rls.ParseSizeBytesString(e.Length)
+			}
+			rls.Protocol = domain.ReleaseProtocolNzb
+			break
+		}
+		if e.Type == "application/x-bittorrent" {
+			if s.feed.Settings != nil && s.feed.Settings.DownloadType == domain.FeedDownloadTypeNzb {
+				continue
+			}
+			if e.URL != "" {
+				rls.DownloadURL = e.URL
+			}
+			if e.Length != "" && e.Length != "1" && e.Length != "39399" {
+				rls.ParseSizeBytesString(e.Length)
+			}
+
+			if s.feed.Settings != nil && s.feed.Settings.DownloadType == domain.FeedDownloadTypeMagnet {
+				if !strings.HasPrefix(rls.MagnetURI, domain.MagnetURIPrefix) && strings.HasPrefix(e.URL, domain.MagnetURIPrefix) {
+					rls.MagnetURI = e.URL
+					rls.DownloadURL = ""
+				}
+			}
+			break
+		}
+	}
+
+	// If download type is explicitly set to NZB, override protocol
+	if s.feed.Settings != nil && s.feed.Settings.DownloadType == domain.FeedDownloadTypeNzb {
+		rls.Protocol = domain.ReleaseProtocolNzb
+	}
+
+	if rls.DownloadURL == "" && item.Link != "" {
+		rls.DownloadURL = sanitize.URLEncoding(item.Link)
+	}
+
+	// a magnet can not be fetched over http, so it never belongs in DownloadURL,
+	// whatever the feed is configured as. It also has no hostname, which would send
+	// it through the relative url handling below and mangle it.
+	if strings.HasPrefix(rls.DownloadURL, domain.MagnetURIPrefix) {
+		if rls.MagnetURI == "" {
+			rls.MagnetURI = rls.DownloadURL
+		}
+
+		rls.DownloadURL = ""
+	}
+
+	if rls.DownloadURL != "" {
+		// handle no baseurl with only relative url
+		// grab url from feed url and create full url
+		if parsedURL, _ := url.Parse(rls.DownloadURL); parsedURL != nil && len(parsedURL.Hostname()) == 0 {
+			if parentURL, _ := url.Parse(s.feed.URL); parentURL != nil {
+				parentURL.Path, parentURL.RawPath = "", ""
+
+				downloadURL := sanitize.URLEncoding(rls.DownloadURL)
+				escapedUrl, _ := url.QueryUnescape(parentURL.JoinPath(downloadURL).String())
+				rls.DownloadURL = escapedUrl
+			}
+		}
+	}
+
+	for _, v := range item.Categories {
+		rls.Categories = append(rls.Categories, v)
+
+		if len(rls.Category) != 0 {
+			rls.Category += ", "
+		}
+
+		rls.Category += v
+	}
+
+	for _, v := range item.Authors {
+		if len(rls.Uploader) != 0 {
+			rls.Uploader += ", "
+		}
+
+		rls.Uploader += v.Name
+	}
+
+	if item.Description != "" {
+		rls.Description = item.Description
+
+		if readSizeFromDescription(item.Description, rls) {
+			s.log.Trace().Uint64("size", rls.Size).Msg("Set new size from description")
+		}
+	}
+
+	// When custom->size and enclosures->size differ, `ParseSizeBytesString` will pick the largest one.
+	if size, ok := item.Custom["size"]; ok {
+		rls.ParseSizeBytesString(size)
+	}
+
+	if customContentLength, ok := item.Custom["contentlength"]; ok {
+		if customContentLength != "" {
+			size, err := strconv.ParseUint(customContentLength, 10, 64)
+			if err == nil {
+				if size > rls.Size {
+					rls.Size = size
+				}
+			} else {
+				s.log.Error().Err(err).Str("customContentLength", customContentLength).Msg("could not parse item.Custom.ContentLength")
+			}
+
+		}
+	} else if cc, ok := item.Custom["contentLength"]; ok {
+		if cc != "" {
+			size, err := strconv.ParseUint(cc, 10, 64)
+			if err == nil {
+				if size > rls.Size {
+					rls.Size = size
+				}
+			} else {
+				s.log.Error().Err(err).Str("contentLength", cc).Msg("could not parse item.Custom.ContentLength")
+			}
+		}
+	}
+
+	if val, ok := item.Custom["infoHash"]; ok {
+		rls.TorrentHash = val
+	}
+
+	if val, ok := item.Custom["seeds"]; ok {
+		value, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			s.log.Error().Err(err).Int64("value", value).Msg("could not parse item.custom.seeds")
+		}
+		rls.Seeders = int(value)
+	}
+
+	if val, ok := item.Custom["peers"]; ok {
+		value, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			s.log.Error().Err(err).Int64("value", value).Msg("could not parse item.custom.peers")
+		}
+		rls.Leechers = int(value) - rls.Seeders
+	}
+
+	if val, ok := item.Custom["magnetURI"]; ok {
+		rls.MagnetURI = val
+	}
+
+	// additional size parsing
+	// some feeds have a fixed size for enclosure so lets check for custom elements
+	// and parse size from there if it differs
+	if customTorrent, ok := item.Custom["torrent"]; ok {
+		var element itemCustomElement
+		if err := xml.Unmarshal([]byte("<torrent>"+customTorrent+"</torrent>"), &element); err != nil {
+			s.log.Error().Err(err).Msg("could not unmarshal item.Custom.Torrent")
+		}
+
+		if element.ContentLength > 0 {
+			if uint64(element.ContentLength) > rls.Size {
+				rls.Size = uint64(element.ContentLength)
+			}
+		}
+
+		if rls.TorrentHash == "" && element.InfoHash != "" {
+			rls.TorrentHash = element.InfoHash
+		}
+	}
+
+	if extParent, extOK := item.Extensions["torrent"]; extOK {
+		if val, ok := extParent["contentLength"]; ok {
+			if len(val) > 0 {
+				if size, err := strconv.ParseUint(val[0].Value, 10, 64); err == nil && size > rls.Size {
+					rls.Size = size
+				}
+			}
+		}
+
+		if val, ok := extParent["contentLengthHR"]; ok {
+			if len(val) > 0 {
+				rls.ParseSizeBytesString(val[0].Value)
+			}
+		}
+
+		if val, ok := extParent["infoHash"]; ok {
+			if len(val) > 0 {
+				rls.TorrentHash = val[0].Value
+			}
+		}
+
+		if val, ok := extParent["magnetURI"]; ok {
+			if len(val) > 0 {
+				rls.MagnetURI = val[0].Value
+			}
+		}
+
+		if val, ok := extParent["seeds"]; ok {
+			if len(val) > 0 {
+				if parsedValue, err := strconv.ParseUint(val[0].Value, 10, 64); err == nil {
+					rls.Seeders = int(parsedValue)
+				}
+			}
+		}
+
+		if val, ok := extParent["peers"]; ok {
+			if len(val) > 0 {
+				if parsedValue, err := strconv.ParseUint(val[0].Value, 10, 64); err == nil {
+					rls.Leechers = int(parsedValue) - rls.Seeders
+				}
+			}
+		}
+
+		if val, ok := extParent["leechers"]; ok {
+			if len(val) > 0 {
+				if parsedValue, err := strconv.ParseUint(val[0].Value, 10, 64); err == nil {
+					rls.Leechers = int(parsedValue)
+				}
+			}
+		}
+
+		//if val, ok := extParent["fileName"]; ok {
+		//	if len(val) > 0 {
+		//		rls.FileName = val[0].Value
+		//	}
+		//}
+	}
+
+	// basic freeleech parsing
+	if isFreeleech([]string{item.Title, item.Description}) {
+		rls.Freeleech = true
+		rls.Bonus = []string{"Freeleech"}
+	}
+
+	// add cookie to release for download if needed
+	if s.feed.Cookie != "" {
+		rls.RawCookie = s.feed.Cookie
+	}
+	if s.feed.UserAgent != "" {
+		rls.UserAgent = s.feed.UserAgent
+	}
+
+	return rls
+}
+
+// isFreeleech basic freeleech parsing
+func isFreeleech(str []string) bool {
+	for _, s := range str {
+		match := rxpFreeleech.FindAllString(s, -1)
+
+		if len(match) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// readSizeFromDescription get size from description
+func readSizeFromDescription(str string, r *domain.Release) bool {
+	clean := rxpHTML.ReplaceAllString(str, " ")
+
+	found := false
+
+	for _, sz := range rxpSize.FindAllString(clean, -1) {
+		if sz == "" {
+			continue
+		}
+
+		s, err := humanize.ParseBytes(sz)
+		if err != nil {
+			continue
+		}
+
+		if s > 0 && s > r.Size {
+			found = true
+			r.Size = s
+		}
+	}
+
+	return found
+}
+
+// itemCustomElement
+// used for some feeds like Aviztas network
+type itemCustomElement struct {
+	ContentLength   int64  `xml:"contentLength,contentlength"`
+	ContentLengthHR string `xml:"contentLengthHR"`
+	InfoHash        string `xml:"infoHash"`
+}

@@ -1,0 +1,676 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package domain
+
+import (
+	"encoding/json"
+	"net/url"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/autobrr/autobrr/pkg/errors"
+)
+
+// Notifiarr API keys are lowercase UUIDs; anything else is rejected by notifiarr.com.
+var rxpNotifiarrAPIKey = regexp.MustCompile(`^[a-z0-9-]{36}$`)
+
+type Notification struct {
+	ClearWebhook  bool                 `json:"-"`
+	ID            int                  `json:"id"`
+	Name          string               `json:"name"`
+	Type          NotificationType     `json:"type"`
+	Enabled       bool                 `json:"enabled"`
+	Events        []string             `json:"events"`
+	Token         string               `json:"token"`
+	APIKey        string               `json:"api_key"`
+	Webhook       string               `json:"webhook"`
+	Title         string               `json:"title"`
+	Icon          string               `json:"icon"`
+	Username      string               `json:"username"`
+	Host          string               `json:"host"`
+	Password      string               `json:"password"`
+	Channel       string               `json:"channel"`
+	Rooms         string               `json:"rooms"`
+	Targets       string               `json:"targets"`
+	Devices       string               `json:"devices"`
+	Priority      int32                `json:"priority"`
+	Topic         string               `json:"topic"`
+	Sound         string               `json:"sound"`
+	EventSounds   map[string]string    `json:"event_sounds,omitempty"` // event -> sound mapping
+	UsedByFilters []FilterNotification `json:"used_by_filters,omitempty"`
+	Method        string               `json:"method,omitempty"`
+	Headers       string               `json:"headers,omitempty"`
+	CreatedAt     time.Time            `json:"created_at"`
+	UpdatedAt     time.Time            `json:"updated_at"`
+}
+
+// UnmarshalJSON distinguishes an explicitly cleared webhook from an omitted credential.
+func (n *Notification) UnmarshalJSON(data []byte) error {
+	type Alias Notification
+	var value Alias
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	var fields struct {
+		Webhook *string `json:"webhook"`
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*n = Notification(value)
+	n.ClearWebhook = fields.Webhook != nil && *fields.Webhook == ""
+	return nil
+}
+
+func NewNotification() *Notification {
+	return &Notification{}
+}
+
+func (n *Notification) IsEnabled() bool {
+	if !n.Enabled {
+		return false
+	}
+
+	switch n.Type {
+	case NotificationTypeBark:
+		if n.Host != "" && n.Token != "" {
+			return true
+		}
+	case NotificationTypeDiscord:
+		if n.Webhook != "" {
+			return true
+		}
+	case NotificationTypeGotify:
+		if n.Host != "" && n.Token != "" {
+			return true
+		}
+	case NotificationTypeLunaSea:
+		if n.Webhook != "" {
+			return true
+		}
+	case NotificationTypeNotifiarr:
+		if n.APIKey != "" {
+			return true
+		}
+	case NotificationTypeNtfy:
+		if n.Host != "" {
+			return true
+		}
+	case NotificationTypePushover:
+		if n.APIKey != "" && n.Token != "" {
+			return true
+		}
+	case NotificationTypeShoutrrr:
+		if n.Host != "" {
+			return true
+		}
+	case NotificationTypeTelegram:
+		if n.Token != "" && n.Channel != "" {
+			return true
+		}
+	case NotificationTypeWebhook:
+		if n.Webhook != "" {
+			return true
+		}
+	case NotificationTypeBuiltin:
+		return true
+	}
+	return false
+}
+
+// Validate checks that the provider-specific fields a sender needs are present and well-formed.
+func (n *Notification) Validate() error {
+	switch n.Type {
+	case NotificationTypeBark:
+		if strings.TrimSpace(n.Host) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing bark server url")
+		}
+		if serverURL, err := url.Parse(n.Host); err != nil || serverURL.Hostname() == "" || serverURL.RawQuery != "" || (serverURL.Scheme != "http" && serverURL.Scheme != "https") {
+			return errors.Wrap(ErrNotificationInvalid, "bark server url must be an http or https url without query parameters")
+		}
+		if strings.TrimSpace(n.Token) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing bark device key")
+		}
+	case NotificationTypeDiscord, NotificationTypeLunaSea, NotificationTypeWebhook:
+		if strings.TrimSpace(n.Webhook) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing webhook url")
+		}
+	case NotificationTypeGotify:
+		if strings.TrimSpace(n.Host) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing gotify url")
+		}
+		if strings.TrimSpace(n.Token) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing gotify application token")
+		}
+	case NotificationTypeNotifiarr:
+		if strings.TrimSpace(n.APIKey) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing notifiarr api key")
+		}
+		if !rxpNotifiarrAPIKey.MatchString(n.APIKey) {
+			return errors.Wrap(ErrNotificationInvalid, "notifiarr api key must be 36 characters of a-z, 0-9 and dashes")
+		}
+	case NotificationTypeNtfy, NotificationTypeShoutrrr:
+		if strings.TrimSpace(n.Host) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing url")
+		}
+	case NotificationTypePushover:
+		if strings.TrimSpace(n.APIKey) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing pushover api token")
+		}
+		if strings.TrimSpace(n.Token) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing pushover user key")
+		}
+	case NotificationTypeTelegram:
+		if strings.TrimSpace(n.Token) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing telegram bot token")
+		}
+		if strings.TrimSpace(n.Channel) == "" {
+			return errors.Wrap(ErrNotificationInvalid, "missing telegram chat id")
+		}
+	case NotificationTypeBuiltin:
+	default:
+		return errors.Wrap(ErrNotificationInvalid, "unsupported notification type: '%s'", n.Type)
+	}
+
+	return nil
+}
+
+func (n Notification) MarshalJSON() ([]byte, error) {
+	type Alias Notification
+	return json.Marshal(&struct {
+		*Alias
+		Token    string `json:"token"`
+		APIKey   string `json:"api_key"`
+		Password string `json:"password"`
+		Webhook  string `json:"webhook"`
+	}{
+		Alias:    (*Alias)(&n),
+		Webhook:  RedactString(n.Webhook),
+		Token:    RedactString(n.Token),
+		APIKey:   RedactString(n.APIKey),
+		Password: RedactString(n.Password),
+	})
+}
+
+type NotificationPayload struct {
+	Subject             string
+	Message             string
+	Event               NotificationEvent
+	ReleaseName         string
+	Filter              string
+	FilterID            int
+	List                string
+	ListID              int64
+	ListType            ListType
+	ListError           string
+	Feed                string
+	FeedID              int
+	FeedType            string
+	FeedError           string
+	IRCNetwork          string
+	IRCMessage          string
+	Indexer             string
+	InfoHash            string
+	Size                uint64
+	Status              ReleasePushStatus
+	Action              string
+	ActionType          ActionType
+	ActionClient        string
+	Rejections          []string
+	Protocol            ReleaseProtocol       // torrent, usenet
+	Implementation      ReleaseImplementation // irc, rss, api
+	Timestamp           time.Time
+	Sender              string
+	FilterNotifications []FilterNotification // per-filter notifications
+	Release             *Release             // full release data for webhook
+	CurrentVersion      string
+	NewVersion          string
+	URL                 string
+}
+
+type NotificationType string
+
+const (
+	NotificationTypeDiscord   NotificationType = "DISCORD"
+	NotificationTypeNotifiarr NotificationType = "NOTIFIARR"
+	NotificationTypePushover  NotificationType = "PUSHOVER"
+	NotificationTypeSlack     NotificationType = "SLACK"
+	NotificationTypeTelegram  NotificationType = "TELEGRAM"
+	NotificationTypeGotify    NotificationType = "GOTIFY"
+	NotificationTypeNtfy      NotificationType = "NTFY"
+	NotificationTypeLunaSea   NotificationType = "LUNASEA"
+	NotificationTypeShoutrrr  NotificationType = "SHOUTRRR"
+	NotificationTypeWebhook   NotificationType = "WEBHOOK"
+	NotificationTypeBark      NotificationType = "BARK"
+	NotificationTypeBuiltin   NotificationType = "BUILTIN"
+)
+
+type NotificationEvent string
+
+const (
+	NotificationEventAppUpdateAvailable   NotificationEvent = "APP_UPDATE_AVAILABLE"
+	NotificationEventPushApproved         NotificationEvent = "PUSH_APPROVED"
+	NotificationEventPushRejected         NotificationEvent = "PUSH_REJECTED"
+	NotificationEventPushError            NotificationEvent = "PUSH_ERROR"
+	NotificationEventIRCDisconnected      NotificationEvent = "IRC_DISCONNECTED"
+	NotificationEventIRCReconnected       NotificationEvent = "IRC_RECONNECTED"
+	NotificationEventIRCUnhealthy         NotificationEvent = "IRC_UNHEALTHY"
+	NotificationEventIRCHealthy           NotificationEvent = "IRC_HEALTHY"
+	NotificationEventListRefreshSuccess   NotificationEvent = "LIST_REFRESH_SUCCESS"
+	NotificationEventListRefreshError     NotificationEvent = "LIST_REFRESH_ERROR"
+	NotificationEventFeedRefreshSuccess   NotificationEvent = "FEED_REFRESH_SUCCESS"
+	NotificationEventFeedRefreshError     NotificationEvent = "FEED_REFRESH_ERROR"
+	NotificationEventReleaseNew           NotificationEvent = "RELEASE_NEW"
+	NotificationEventTest                 NotificationEvent = "TEST"
+	NotificationEventUFCDownloadCompleted NotificationEvent = "UFC_DOWNLOAD_COMPLETED"
+	NotificationEventUFCCopyCompleted     NotificationEvent = "UFC_COPY_COMPLETED"
+	NotificationEventUFCAttention         NotificationEvent = "UFC_ATTENTION"
+)
+
+func (e NotificationEvent) String() string {
+	return string(e)
+}
+
+type NotificationEventArr []NotificationEvent
+
+// InboxMessage is a notification delivered by the built-in notification.
+type InboxMessage struct {
+	ID           int64             `json:"id"`
+	Event        NotificationEvent `json:"event"`
+	Title        string            `json:"title"`
+	Message      string            `json:"message"`
+	ReleaseName  string            `json:"release_name"`
+	Indexer      string            `json:"indexer"`
+	FilterName   string            `json:"filter_name"`
+	FilterID     int               `json:"filter_id"`
+	Action       string            `json:"action"`
+	ActionClient string            `json:"action_client"`
+	Rejections   []string          `json:"rejections"`
+	URL          string            `json:"url"`
+	ReadAt       *time.Time        `json:"read_at"`
+	CreatedAt    time.Time         `json:"created_at"`
+}
+
+type InboxQueryParams struct {
+	Limit  uint64
+	Offset uint64
+	Unread bool
+	Events []string
+}
+
+// FindInboxResponse holds one page of messages. TotalCount matches the query, AllCount and
+// UnreadCount ignore the unread filter so the UI can show both tab counts.
+type FindInboxResponse struct {
+	Data        []*InboxMessage `json:"data"`
+	TotalCount  int             `json:"count"`
+	AllCount    int             `json:"all_count"`
+	UnreadCount int             `json:"unread_count"`
+}
+
+type InboxCleanupParams struct {
+	MaxMessages int
+	OlderThan   time.Time
+}
+
+type NotificationQueryParams struct {
+	Limit   uint64
+	Offset  uint64
+	Sort    map[string]string
+	Filters struct {
+		Indexers   []string
+		PushStatus string
+	}
+	Search string
+}
+
+// WebhookEventType represents namespaced event types
+type WebhookEventType string
+
+const (
+	WebhookEventReleaseNew         WebhookEventType = "release.new"
+	WebhookEventActionApproved     WebhookEventType = "action.approved"
+	WebhookEventActionRejected     WebhookEventType = "action.rejected"
+	WebhookEventActionError        WebhookEventType = "action.error"
+	WebhookEventIRCDisconnected    WebhookEventType = "irc.disconnected"
+	WebhookEventIRCReconnected     WebhookEventType = "irc.reconnected"
+	WebhookEventIRCUnhealthy       WebhookEventType = "irc.unhealthy"
+	WebhookEventIRCHealthy         WebhookEventType = "irc.healthy"
+	WebhookEventListRefreshSuccess WebhookEventType = "list.refresh_success"
+	WebhookEventListRefreshError   WebhookEventType = "list.refresh_error"
+	WebhookEventFeedRefreshSuccess WebhookEventType = "feed.refresh_success"
+	WebhookEventFeedRefreshError   WebhookEventType = "feed.refresh_error"
+	WebhookEventAppUpdate          WebhookEventType = "app.update_available"
+	WebhookEventTest               WebhookEventType = "test"
+)
+
+// WebhookEvent is the top-level webhook payload structure
+type WebhookEvent struct {
+	Event     WebhookEventType `json:"event"`
+	ID        string           `json:"id"`
+	Timestamp time.Time        `json:"timestamp"`
+	Version   string           `json:"version"`
+	Data      *WebhookData     `json:"data"`
+}
+
+// WebhookData contains all nested event data
+type WebhookData struct {
+	UFC     *WebhookUFC     `json:"ufc,omitempty"`
+	Release *WebhookRelease `json:"release,omitempty"`
+	Indexer *WebhookIndexer `json:"indexer,omitempty"`
+	Filter  *WebhookFilter  `json:"filter,omitempty"`
+	Action  *WebhookAction  `json:"action,omitempty"`
+	Result  *WebhookResult  `json:"result,omitempty"`
+	List    *WebhookList    `json:"list,omitempty"`
+	Feed    *WebhookFeed    `json:"feed,omitempty"`
+	IRC     *WebhookIRC     `json:"irc,omitempty"`
+}
+
+// WebhookUFC contains safe completion facts without download links or media paths.
+type WebhookUFC struct {
+	Title   string `json:"title"`
+	Message string `json:"message"`
+}
+
+// WebhookRelease contains release-specific data
+type WebhookRelease struct {
+	Protocol         string       `json:"protocol,omitempty"`
+	Implementation   string       `json:"implementation,omitempty"`
+	Timestamp        time.Time    `json:"timestamp"`
+	Type             string       `json:"type"`
+	AnnounceType     AnnounceType `json:"announce_type"`
+	Link             string       `json:"link,omitempty"`
+	DownloadURL      string       `json:"download_url,omitempty"`
+	InfoURL          string       `json:"info_url,omitempty"`
+	MagnetURI        string       `json:"magnet_uri,omitempty"`
+	Category         string       `json:"category,omitempty"`
+	Categories       []string     `json:"categories,omitempty"`
+	ExternalID       string       `json:"external_id,omitempty"`
+	ExternalGroupID  string       `json:"external_group_id,omitempty"`
+	Size             uint64       `json:"size,omitempty"`
+	Name             string       `json:"name"`
+	Title            string       `json:"title,omitempty"`
+	SubTitle         string       `json:"sub_title,omitempty"`
+	Season           int          `json:"season,omitempty"`
+	Episode          int          `json:"episode,omitempty"`
+	Year             int          `json:"year,omitempty"`
+	Month            int          `json:"month,omitempty"`
+	Day              int          `json:"day,omitempty"`
+	Resolution       string       `json:"resolution,omitempty"`
+	Source           string       `json:"source,omitempty"`
+	Codec            []string     `json:"codec,omitempty"`
+	Container        string       `json:"container,omitempty"`
+	DynamicRange     []string     `json:"dynamic_range,omitempty"`
+	Audio            []string     `json:"audio,omitempty"`
+	AudioChannels    string       `json:"audio_channels,omitempty"`
+	AudioFormat      string       `json:"audio_format,omitempty"`
+	Bitrate          string       `json:"bitrate,omitempty"`
+	MediaProcessing  string       `json:"media_processing,omitempty"`
+	Group            string       `json:"group,omitempty"`
+	Website          string       `json:"website,omitempty"`
+	Origin           string       `json:"origin,omitempty"`
+	Uploader         string       `json:"uploader,omitempty"`
+	PreTime          string       `json:"pre_time,omitempty"`
+	Edition          []string     `json:"edition,omitempty"`
+	Cut              []string     `json:"cut,omitempty"`
+	Language         []string     `json:"language,omitempty"`
+	Region           string       `json:"region,omitempty"`
+	Tags             []string     `json:"tags,omitempty"`
+	Proper           bool         `json:"proper,omitempty"`
+	Repack           bool         `json:"repack,omitempty"`
+	Hybrid           bool         `json:"hybrid,omitempty"`
+	Artists          string       `json:"artists,omitempty"`
+	RecordLabel      string       `json:"record_label,omitempty"`
+	HasCue           bool         `json:"has_cue,omitempty"`
+	HasLog           bool         `json:"has_log,omitempty"`
+	LogScore         int          `json:"log_score,omitempty"`
+	Freeleech        bool         `json:"freeleech,omitempty"`
+	FreeleechPercent int          `json:"freeleech_percent,omitempty"`
+	Seeders          int          `json:"seeders,omitempty"`
+	Leechers         int          `json:"leechers,omitempty"`
+	MetaIMDB         string       `json:"meta_imdb,omitempty"`
+	MetaTMDB         int          `json:"meta_tmdb,omitempty"`
+	MetaTVDB         int          `json:"meta_tvdb,omitempty"`
+	MetaIGDB         int          `json:"meta_igdb,omitempty"`
+}
+
+// WebhookIndexer contains indexer information
+type WebhookIndexer struct {
+	Name           string `json:"name"`
+	Identifier     string `json:"identifier,omitempty"`
+	Protocol       string `json:"protocol,omitempty"`
+	Implementation string `json:"implementation,omitempty"`
+}
+
+// WebhookFilter contains filter information
+type WebhookFilter struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// WebhookAction contains action information
+type WebhookAction struct {
+	Name   string `json:"name,omitempty"`
+	Type   string `json:"type,omitempty"`
+	Client string `json:"client,omitempty"`
+}
+
+// WebhookList contains list refresh information
+type WebhookList struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Error string `json:"error,omitempty"`
+}
+
+// WebhookFeed contains feed refresh information
+type WebhookFeed struct {
+	ID    int    `json:"id"`
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Error string `json:"error,omitempty"`
+}
+
+// WebhookIRC contains irc network information
+type WebhookIRC struct {
+	Network string `json:"network"`
+	Message string `json:"message,omitempty"`
+}
+
+// WebhookResult contains push result information
+type WebhookResult struct {
+	Status     string   `json:"status,omitempty"`
+	Rejections []string `json:"rejections,omitempty"`
+}
+
+func mapNotificationEventToWebhookEvent(event NotificationEvent) WebhookEventType {
+	switch event {
+	case NotificationEventUFCDownloadCompleted:
+		return WebhookEventType("ufc.download_completed")
+	case NotificationEventUFCCopyCompleted:
+		return WebhookEventType("ufc.copy_completed")
+	case NotificationEventUFCAttention:
+		return WebhookEventType("ufc.attention")
+	case NotificationEventReleaseNew:
+		return WebhookEventReleaseNew
+	case NotificationEventPushApproved:
+		return WebhookEventActionApproved
+	case NotificationEventPushRejected:
+		return WebhookEventActionRejected
+	case NotificationEventPushError:
+		return WebhookEventActionError
+	case NotificationEventIRCDisconnected:
+		return WebhookEventIRCDisconnected
+	case NotificationEventIRCReconnected:
+		return WebhookEventIRCReconnected
+	case NotificationEventIRCUnhealthy:
+		return WebhookEventIRCUnhealthy
+	case NotificationEventIRCHealthy:
+		return WebhookEventIRCHealthy
+	case NotificationEventListRefreshSuccess:
+		return WebhookEventListRefreshSuccess
+	case NotificationEventListRefreshError:
+		return WebhookEventListRefreshError
+	case NotificationEventFeedRefreshSuccess:
+		return WebhookEventFeedRefreshSuccess
+	case NotificationEventFeedRefreshError:
+		return WebhookEventFeedRefreshError
+	case NotificationEventAppUpdateAvailable:
+		return WebhookEventAppUpdate
+	case NotificationEventTest:
+		return WebhookEventTest
+	default:
+		return WebhookEventTest
+	}
+}
+
+// NewWebhookEvent creates a structured webhook payload
+func NewWebhookEvent(event NotificationEvent, payload NotificationPayload, id string) *WebhookEvent {
+	eventPayload := &WebhookEvent{
+		Event:     mapNotificationEventToWebhookEvent(event),
+		ID:        id,
+		Timestamp: payload.Timestamp,
+		Version:   "1.0",
+	}
+	data := &WebhookData{}
+	if event == NotificationEventUFCDownloadCompleted || event == NotificationEventUFCCopyCompleted || event == NotificationEventUFCAttention {
+		data.UFC = &WebhookUFC{Title: payload.ReleaseName, Message: payload.Message}
+	}
+
+	// Populate Release data if available
+	if payload.Release != nil {
+		release := payload.Release
+		data.Release = &WebhookRelease{
+			Protocol:         string(release.Protocol),
+			Implementation:   string(release.Implementation),
+			Timestamp:        release.Timestamp,
+			Type:             release.Type.String(),
+			AnnounceType:     release.AnnounceType,
+			DownloadURL:      release.DownloadURL,
+			InfoURL:          release.InfoURL,
+			MagnetURI:        release.MagnetURI,
+			Category:         release.Category,
+			Categories:       release.Categories,
+			ExternalID:       release.TorrentID,
+			ExternalGroupID:  release.GroupID,
+			Size:             release.Size,
+			Name:             release.TorrentName,
+			Title:            release.Title,
+			SubTitle:         release.SubTitle,
+			Season:           release.Season,
+			Episode:          release.Episode,
+			Year:             release.Year,
+			Month:            release.Month,
+			Day:              release.Day,
+			Resolution:       release.Resolution,
+			Source:           release.Source,
+			Codec:            release.Codec,
+			Container:        release.Container,
+			DynamicRange:     release.HDR,
+			Audio:            release.Audio,
+			AudioChannels:    release.AudioChannels,
+			AudioFormat:      release.AudioFormat,
+			Bitrate:          release.Bitrate,
+			MediaProcessing:  release.MediaProcessing,
+			Group:            release.Group,
+			Website:          release.Website,
+			Origin:           release.Origin,
+			Uploader:         release.Uploader,
+			PreTime:          release.PreTime,
+			Edition:          release.Edition,
+			Cut:              release.Cut,
+			Language:         release.Language,
+			Region:           release.Region,
+			Tags:             release.Tags,
+			Proper:           release.Proper,
+			Repack:           release.Repack,
+			Hybrid:           release.Hybrid,
+			Artists:          release.Artists,
+			RecordLabel:      release.RecordLabel,
+			HasCue:           release.HasCue,
+			HasLog:           release.HasLog,
+			LogScore:         release.LogScore,
+			Freeleech:        release.Freeleech,
+			FreeleechPercent: release.FreeleechPercent,
+			Seeders:          release.Seeders,
+			Leechers:         release.Leechers,
+			MetaIMDB:         release.MetaIMDB,
+			MetaTMDB:         release.MetaTMDB,
+			MetaTVDB:         release.MetaTVDB,
+			MetaIGDB:         release.MetaIGDB,
+		}
+	} else if payload.ReleaseName != "" {
+		// Fallback if full release object is missing but we have basic info in payload
+		data.Release = &WebhookRelease{
+			Name: payload.ReleaseName,
+			Size: payload.Size,
+		}
+	}
+
+	// Populate Indexer data
+	if payload.Indexer != "" {
+		data.Indexer = &WebhookIndexer{
+			Name:     payload.Indexer,
+			Protocol: string(payload.Protocol),
+		}
+		// If we have full release object, we might have more indexer info
+		if payload.Release != nil {
+			data.Indexer.Identifier = payload.Release.Indexer.Identifier
+		}
+	}
+
+	// Populate Filter data
+	if payload.Filter != "" || payload.FilterID > 0 {
+		data.Filter = &WebhookFilter{
+			ID:   payload.FilterID,
+			Name: payload.Filter,
+		}
+	}
+
+	// Populate Action data
+	if payload.Action != "" || payload.ActionType != "" {
+		data.Action = &WebhookAction{
+			Name:   payload.Action,
+			Type:   string(payload.ActionType),
+			Client: payload.ActionClient,
+		}
+	}
+
+	// Populate Result data for action events
+	if event == NotificationEventPushApproved || event == NotificationEventPushRejected || event == NotificationEventPushError {
+		data.Result = &WebhookResult{
+			Status:     string(payload.Status),
+			Rejections: payload.Rejections,
+		}
+	}
+
+	if event == NotificationEventListRefreshSuccess || event == NotificationEventListRefreshError {
+		data.List = &WebhookList{
+			ID:    payload.ListID,
+			Name:  payload.List,
+			Type:  string(payload.ListType),
+			Error: payload.ListError,
+		}
+	}
+
+	if event == NotificationEventFeedRefreshSuccess || event == NotificationEventFeedRefreshError {
+		data.Feed = &WebhookFeed{
+			ID:    payload.FeedID,
+			Name:  payload.Feed,
+			Type:  payload.FeedType,
+			Error: payload.FeedError,
+		}
+	}
+
+	if event == NotificationEventIRCDisconnected || event == NotificationEventIRCReconnected || event == NotificationEventIRCUnhealthy || event == NotificationEventIRCHealthy {
+		data.IRC = &WebhookIRC{
+			Network: payload.IRCNetwork,
+			Message: payload.IRCMessage,
+		}
+	}
+
+	eventPayload.Data = data
+
+	return eventPayload
+}

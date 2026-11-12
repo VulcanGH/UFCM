@@ -1,0 +1,640 @@
+name: build
+
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - 'v*'
+    paths-ignore:
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/images/**'
+      - 'config.toml'
+      - 'docker-compose.yml'
+      - 'Makefile'
+      - '**.md'
+  pull_request:
+    paths-ignore:
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/images/**'
+      - 'config.toml'
+      - 'docker-compose.yml'
+      - 'Makefile'
+      - '**.md'
+
+env:
+  REGISTRY: ghcr.io
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
+  NODE_VERSION: '24.15.0'
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+
+jobs:
+  web:
+    name: Build App Interface
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6.1.1
+        with:
+          package_json_file: web/package.json
+
+      # It can not be done before installing pnpm
+      - name: Set up cache
+        uses: actions/setup-node@v7
+        with:
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Fetch web dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web frontend
+        working-directory: web
+        run: CI= pnpm run build
+
+      - name: Upload web production build
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: web/dist
+
+  web-test:
+    name: Test App Interface
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6.1.1
+        with:
+          package_json_file: web/package.json
+
+      # It can not be done before installing pnpm
+      - name: Set up cache
+        uses: actions/setup-node@v7
+        with:
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Fetch web dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Run web tests
+        working-directory: web
+        run: pnpm run test
+
+  test:
+    name: Test ubuntu-latest
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check indexer deprecation tombstones
+        if: github.event_name == 'pull_request'
+        run: scripts/check-indexer-deprecations.sh "${{ github.event.pull_request.base.sha }}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go cache
+        id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-test-unit-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-test-unit-${{ hashFiles('go.sum') }}-
+            go-test-unit-
+
+      - name: Test
+        run: go run gotest.tools/gotestsum@latest --junitfile unit-tests.xml --format pkgname -- -tags=integration ./...
+
+      - name: Save Go cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+      - name: Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: "unit-tests.xml"
+        if: always()
+
+  test-irc:
+    name: Test IRC integration
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go cache
+        id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-test-irc-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-test-irc-${{ hashFiles('go.sum') }}-
+            go-test-irc-
+
+      - name: Test
+        run: go run gotest.tools/gotestsum@latest --junitfile irc-tests.xml --format pkgname -- -tags=irc_integration_test ./internal/irc/... ./test/irc/...
+
+      - name: Save Go cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+      - name: Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: "irc-tests.xml"
+        if: always()
+
+  testother:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: ${{ fromJSON(github.repository == 'VulcanGH/UFCM' && '["windows-latest"]' || '["macos-latest", "windows-latest"]') }}
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    env:
+      GOPATH: ${{ startsWith(matrix.os, 'windows') && 'D:\golang\go' || '' }}
+      GOCACHE: ${{ startsWith(matrix.os, 'windows') && 'D:\golang\cache' || '' }}
+      GOMODCACHE: ${{ startsWith(matrix.os, 'windows') && 'D:\golang\modcache' || '' }}
+      USERPROFILE: ${{ startsWith(matrix.os, 'windows') && 'D:\homedir' || '' }}
+      CGO_ENABLED: 0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        shell: bash
+        run: go run gotest.tools/gotestsum@latest --junitfile unit-tests.xml --format pkgname -- ./...
+
+      - name: Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: "unit-tests.xml"
+        if: always()
+
+  prepare:
+    if: ${{ github.repository != 'VulcanGH/UFCM' }}
+    needs: [ web ]
+    strategy:
+      matrix:
+        goos: [ linux, freebsd, darwin, windows ]
+    runs-on: ubuntu-latest
+    name: Build distribution binaries ${{ matrix.goos }}
+    env:
+      flags: ""
+      GOOS: ${{ matrix.goos }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download web production build
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # setup-go's cache key only changes with go.sum, so it is never re-saved
+      # and the build cache goes stale; key on the commit and restore by prefix.
+      - name: Restore Go cache
+        id: go-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-release-${{ matrix.goos }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-release-${{ matrix.goos }}-${{ hashFiles('go.sum') }}-
+            go-release-${{ matrix.goos }}-
+
+      - if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          echo "flags=--nightly" >> $GITHUB_ENV
+
+      - name: Get short SHA
+        shell: bash
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Set cache prefix
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "cache_prefix=release" >> $GITHUB_ENV
+          else
+            echo "cache_prefix=push" >> $GITHUB_ENV
+          fi
+
+      - name: Cache builds
+        uses: actions/cache@v6
+        with:
+          path: dist/${{ matrix.goos }}
+          key: ${{ env.cache_prefix }}-${{ matrix.goos}}-${{ env.sha_short }}${{ env.flags }}
+
+      # GoReleaser builds the desktop MSI with wixl, which Ubuntu ships in its own package
+      - name: Install wixl
+        if: matrix.goos == 'windows'
+        run: sudo apt-get update && sudo apt-get install -y wixl
+
+      - name: Run GoReleaser snapshot build
+        if: ${{ ! startsWith(github.ref, 'refs/tags/') }}
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser-pro
+          version: "~> v2"
+          args: release --clean --skip=validate,publish --snapshot --split ${{ env.flags }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+
+      - name: Run GoReleaser build
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser-pro
+          version: "~> v2"
+          args: release --clean --split ${{ env.flags }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+
+      - name: Save Go cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+      - name: Upload assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: autobrr-${{ matrix.goos }}
+          path: |
+            dist/${{ matrix.goos }}/*.tar.gz
+            dist/${{ matrix.goos }}/*.zip
+            dist/${{ matrix.goos }}/*.apk
+            dist/${{ matrix.goos }}/*.deb
+            dist/${{ matrix.goos }}/*.rpm
+            dist/${{ matrix.goos }}/msi/*/*.msi
+
+  release:
+    name: Merge and publish distribution binaries
+    if: ${{ github.repository != 'VulcanGH/UFCM' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request') }}
+    runs-on: ubuntu-latest
+    needs: [ prepare, test, test-irc, testother, web-test ]
+    env:
+      flags: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # copy the caches from prepare
+      - if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          echo "flags=--nightly" >> $GITHUB_ENV
+
+      - name: Get short SHA
+        shell: bash
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Set cache prefix
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "cache_prefix=release" >> $GITHUB_ENV
+          else
+            echo "cache_prefix=push" >> $GITHUB_ENV
+          fi
+
+      - name: Get Linux cache
+        uses: actions/cache@v6
+        with:
+          path: dist/linux
+          key: ${{ env.cache_prefix }}-linux-${{ env.sha_short }}${{ env.flags }}
+
+      - name: Get FreeBSD cache
+        uses: actions/cache@v6
+        with:
+          path: dist/freebsd
+          key: ${{ env.cache_prefix }}-freebsd-${{ env.sha_short }}${{ env.flags }}
+
+      - name: Get Darwin cache
+        uses: actions/cache@v6
+        with:
+          path: dist/darwin
+          key: ${{ env.cache_prefix }}-darwin-${{ env.sha_short }}${{ env.flags }}
+
+      - name: Get Windows cache
+        uses: actions/cache@v6
+        with:
+          path: dist/windows
+          key: ${{ env.cache_prefix }}-windows-${{ env.sha_short }}${{ env.flags }}
+
+      - name: Download web production build
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Create web dist tarball
+        run: tar -czf web-dist.tar.gz -C . web/dist
+
+      # release
+      - name: Merge and publish GoReleaser build
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser-pro
+          version: "~> v2"
+          args: continue --merge
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+
+  docker:
+    if: ${{ github.repository != 'VulcanGH/UFCM' }}
+    name: Build Docker images
+    needs: [ web ]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/386
+            runner: ubuntu-latest
+            qemu: true
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/amd64/v2
+            runner: ubuntu-latest
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/amd64/v3
+            runner: ubuntu-latest
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/arm/v6
+            runner: ubuntu-24.04-arm
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/arm/v7
+            runner: ubuntu-24.04-arm
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/arm64/v8.2 # Neoverse + Raspberry Pi
+            runner: ubuntu-24.04-arm
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/arm64/v8.4 # AWS Graviton3
+            runner: ubuntu-24.04-arm
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/arm64/v9
+            runner: ubuntu-24.04-arm
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/arm64/v9.2 # Apple M4
+            runner: ubuntu-24.04-arm
+            qemu: false
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/ppc64le
+            runner: ubuntu-latest
+            qemu: true
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/riscv64
+            runner: ubuntu-latest
+            qemu: true
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: linux/s390x
+            runner: ubuntu-latest
+            qemu: true
+            file: ./distrib/docker/ci.Dockerfile
+
+          - platform: windows/amd64
+            # runner: windows-latest
+            runner: ubuntu-latest
+            qemu: true
+            file: ./distrib/docker/ciwindows.Dockerfile
+
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download web production build
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=ref,event=branch
+            type=ref,event=pr
+          flavor: |
+            latest=auto
+
+      - name: Set up QEMU
+        if: matrix.qemu == true
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Supported Architectures
+        run: docker buildx ls
+
+      - name: Build and publish image
+        id: docker_build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.file || './distrib/docker/ci.Dockerfile' }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=${{ (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request') && 'true' || 'false' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+            REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
+          provenance: false
+
+      - name: Export image digest
+        id: digest-prep
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.docker_build.outputs.digest }}"
+          echo "manifest-hash=${digest#sha256:}" >> "$GITHUB_OUTPUT"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload image digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-digests-${{ steps.digest-prep.outputs.manifest-hash }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-merge:
+    name: Publish Docker multi-arch manifest
+    if: ${{ github.repository != 'VulcanGH/UFCM' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request') }}
+    runs-on: ubuntu-latest
+    needs: [ docker, test, test-irc, testother, web-test ]
+    steps:
+      - name: Download image digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: docker-digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}},prefix=v
+            type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=ref,event=branch
+            type=ref,event=pr
+          flavor: |
+            latest=auto
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}

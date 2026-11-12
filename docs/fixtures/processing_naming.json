@@ -1,0 +1,25 @@
+{
+  "format": "ufc-processing-naming-v1",
+  "purpose": "Synthetic planning fixtures; no source paths, credentials or media bytes",
+  "layout": [
+    {"case": "numbered-main", "source": "UFC.999.Avery.vs.Blake.2026.1080p.mkv", "event_title": "UFC 999 Avery vs. Blake", "year": 2026, "component": "Main Card", "relative_destination": "UFC 999 Avery vs. Blake (2026)/UFC 999 Avery vs. Blake (2026).mkv"},
+    {"case": "numbered-prelims", "source": "UFC.999.Avery.vs.Blake.Prelims.2026.mp4", "event_title": "UFC 999 Avery vs. Blake", "year": 2026, "component": "Prelims", "relative_destination": "UFC 999 Avery vs. Blake (2026)/Featurettes/UFC 999 Avery vs. Blake (2026) - Prelims.mp4"},
+    {"case": "numbered-early-prelims", "source": "UFC.999.Early.Prelims.2026.mkv", "event_title": "UFC 999 Avery vs. Blake", "year": 2026, "component": "Early Prelims", "relative_destination": "UFC 999 Avery vs. Blake (2026)/Featurettes/UFC 999 Avery vs. Blake (2026) - Early Prelims.mkv"},
+    {"case": "fight-night-main", "source": "UFC.Fight.Night.299.Casey.vs.Drew.2026.mkv", "event_title": "UFC Fight Night 299 Casey vs. Drew", "year": 2026, "component": "Main Card", "relative_destination": "UFC Fight Night 299 Casey vs. Drew (2026)/UFC Fight Night 299 Casey vs. Drew (2026).mkv"},
+    {"case": "fight-night-prelims", "source": "UFC.Fight.Night.299.Prelims.2026.avi", "event_title": "UFC Fight Night 299 Casey vs. Drew", "year": 2026, "component": "Prelims", "relative_destination": "UFC Fight Night 299 Casey vs. Drew (2026)/Featurettes/UFC Fight Night 299 Casey vs. Drew (2026) - Prelims.avi"},
+    {"case": "countdown", "source": "UFC.999.Countdown.2026.mkv", "event_title": "UFC 999 Avery vs. Blake", "year": 2026, "component": "Countdown", "relative_destination": "UFC 999 Avery vs. Blake (2026)/Featurettes/UFC 999 Avery vs. Blake (2026) - Countdown.mkv"},
+    {"case": "embedded", "source": "UFC.999.Embedded.2026.mkv", "event_title": "UFC 999 Avery vs. Blake", "year": 2026, "component": "Embedded", "relative_destination": "UFC 999 Avery vs. Blake (2026)/Featurettes/UFC 999 Avery vs. Blake (2026) - Embedded.mkv"},
+    {"case": "espn-alias", "source": "UFC.on.ESPN.88.Ellis.vs.Finley.2026.mkv", "event_title": "UFC on ESPN 88 Ellis vs. Finley", "year": 2026, "component": "Main Card", "relative_destination": "UFC on ESPN 88 Ellis vs. Finley (2026)/UFC on ESPN 88 Ellis vs. Finley (2026).mkv"},
+    {"case": "abc-alias", "source": "UFC.on.ABC.12.Gray.vs.Harper.2026.mkv", "event_title": "UFC on ABC 12 Gray vs. Harper", "year": 2026, "component": "Main Card", "relative_destination": "UFC on ABC 12 Gray vs. Harper (2026)/UFC on ABC 12 Gray vs. Harper (2026).mkv"},
+    {"case": "freedom-alias", "source": "UFC.Freedom.2.Ira.vs.Jules.2026.mkv", "event_title": "UFC Freedom 2 Ira vs. Jules", "year": 2026, "component": "Main Card", "relative_destination": "UFC Freedom 2 Ira vs. Jules (2026)/UFC Freedom 2 Ira vs. Jules (2026).mkv"},
+    {"case": "rematch", "source": "UFC.998.Kai.vs.Lane.2.2026.MP4", "event_title": "UFC 998 Kai vs. Lane 2", "year": 2026, "component": "Main Card", "relative_destination": "UFC 998 Kai vs. Lane 2 (2026)/UFC 998 Kai vs. Lane 2 (2026).MP4"}
+  ],
+  "corrections": [
+    {"case": "missing-year", "source": "UFC.999.Avery.vs.Blake.mkv", "expected": "review", "reason": "Do not infer the current year from the filename"},
+    {"case": "ambiguous-event", "source": "UFC.Fight.Night.Casey.vs.Drew.mkv", "expected": "review", "reason": "Do not create a headliner-only event identity"},
+    {"case": "two-main-files", "sources": ["UFC.999.Part.1.mkv", "UFC.999.Part.2.mkv"], "expected": "distinct_operations", "reason": "Do not mark an entire component processed after one file"},
+    {"case": "different-content-conflict", "source": "UFC.999.Avery.vs.Blake.mkv", "expected": "review", "reason": "Do not automatically number or replace an existing library file"},
+    {"case": "incomplete-copy", "source": "UFC.999.Avery.vs.Blake.mkv", "expected": "recover_or_review", "reason": "A partial destination or state flag never proves verified coverage"},
+    {"case": "fight-night-early-prelims", "source": "UFC.Fight.Night.299.Early.Prelims.mkv", "expected": "not_wanted_by_default", "reason": "Fight Night defaults do not want Early Prelims; an explicit event override may change that"}
+  ]
+}

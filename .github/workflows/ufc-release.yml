@@ -1,0 +1,136 @@
+name: UFC Manager release draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable version tag, for example v1.0.1
+        required: true
+        type: string
+      sequence:
+        description: Increasing signing sequence; use 20000000 for 1.0.0 and a higher value for each later release
+        required: true
+        type: string
+        default: '20000000'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ufc-manager-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'VulcanGH/UFCM'
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_SEQUENCE: ${{ inputs.sequence }}
+      UFC_UPDATE_PUBLIC_KEY: ${{ vars.UFC_UPDATE_PUBLIC_KEY }}
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.15.0'
+      - name: Validate release inputs
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'An existing stable version tag is required' }
+          if ($env:RELEASE_SEQUENCE -notmatch '^[1-9][0-9]{0,17}$') { throw 'A positive, increasing signing sequence is required' }
+          if ([Convert]::FromBase64String($env:UFC_UPDATE_PUBLIC_KEY).Length -ne 32) { throw 'Configure the pinned public verification key first' }
+          git diff --exit-code
+          if ($LASTEXITCODE -ne 0) { throw 'Release source is dirty' }
+      - name: Install locked frontend dependencies
+        shell: pwsh
+        run: |
+          npm install --global pnpm@11.24.0
+          if ($LASTEXITCODE -ne 0) { throw 'pnpm installation failed' }
+          pnpm --dir web install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed' }
+      - name: Focused verification
+        shell: pwsh
+        run: |
+          go test ./internal/ufc/updater ./internal/maintenance ./internal/application ./internal/http ./internal/cli ./cmd/autobrr-desktop ./internal/ufc/library ./internal/ufc/matching ./internal/ufc/processing
+          if ($LASTEXITCODE -ne 0) { throw 'Updater checks failed' }
+          go test -tags=integration ./internal/ufc/database -run '^(TestUpdateUpgradeBothEngines|TestManualDownloadsBothEngines)$' -count=1
+          if ($LASTEXITCODE -ne 0) { throw 'Both database engines must pass upgrade preservation checks' }
+          pnpm --dir web test test/ufc-updates.test.tsx
+          if ($LASTEXITCODE -ne 0) { throw 'Updater UI checks failed' }
+          pnpm --dir web lint
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend lint failed' }
+          ./scripts/test-release-source.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Release source privacy policy failed' }
+      - name: Prepare pinned installer tooling
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .dev/tools | Out-Null
+          Invoke-WebRequest 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip' -OutFile .dev/tools/wix-ci.zip
+          if ((Get-FileHash .dev/tools/wix-ci.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31') { throw 'WiX archive hash mismatch' }
+          Expand-Archive .dev/tools/wix-ci.zip .dev/tools/wix-ci
+      - name: Build launcher packages
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -Version $env:RELEASE_TAG.Substring(1) -WixRoot .dev/tools/wix-ci
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ufc-release
+          path: |
+            bin/packages/ufc-manager-*/ufc-manager-*-windows-x86_64.msi
+            bin/packages/ufc-manager-*/ufc-manager-*-runtime-windows-amd64.zip
+            bin/packages/ufc-manager-*/SHA256SUMS.txt
+          retention-days: 3
+          if-no-files-found: error
+
+  sign-draft:
+    needs: build
+    runs-on: windows-latest
+    environment: ufc-release
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_SEQUENCE: ${{ inputs.sequence }}
+      UFC_UPDATE_PUBLIC_KEY: ${{ vars.UFC_UPDATE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ufc-release
+          path: release
+      - name: Sign exact update metadata
+        shell: pwsh
+        env:
+          UFC_UPDATE_PRIVATE_KEY: ${{ secrets.UFC_UPDATE_PRIVATE_KEY }}
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $package = Join-Path $PWD ('release/ufc-manager-' + $version)
+          if (-not (Test-Path $package)) { $package = Join-Path $PWD 'release' }
+          $payload = Join-Path $package ('ufc-manager-' + $version + '-runtime-windows-amd64.zip')
+          $runtime = Join-Path $PWD '.dev/signing-runtime'
+          Expand-Archive -LiteralPath $payload -DestinationPath $runtime
+          $commit = (git rev-parse HEAD).Trim()
+          go run -ldflags "-X github.com/autobrr/autobrr/internal/ufc/updater.PublicKey=$env:UFC_UPDATE_PUBLIC_KEY" ./cmd/ufc-update-release --version $env:RELEASE_TAG --commit $commit --sequence $env:RELEASE_SEQUENCE --runtime $runtime --payload $payload --output $package
+          if ($LASTEXITCODE -ne 0) { throw 'Manifest signing failed' }
+          "UFC_PACKAGE=$package" >> $env:GITHUB_ENV
+      - name: Create complete draft for maintainer review
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . ./scripts/release-source.ps1
+          $assets = @(Get-ReleaseAssetNames -Version $env:RELEASE_TAG.Substring(1) -Signed | ForEach-Object { $path = Join-Path $env:UFC_PACKAGE $_; if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Required release asset missing' }; $path })
+          gh release create $env:RELEASE_TAG @assets --repo VulcanGH/UFCM --verify-tag --draft --title "UFC Manager $env:RELEASE_TAG" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Draft publication failed; an existing release must never be overwritten' }

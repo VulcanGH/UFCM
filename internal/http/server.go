@@ -1,0 +1,518 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package http
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/netip"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/autobrr/autobrr/internal/config"
+	"github.com/autobrr/autobrr/internal/domain"
+	"github.com/autobrr/autobrr/internal/maintenance"
+	"github.com/autobrr/autobrr/pkg/errors"
+	"github.com/autobrr/autobrr/web"
+
+	"github.com/alexedwards/scs/v2"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/r3labs/sse/v2"
+	"github.com/rs/cors"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/hlog"
+)
+
+type Server struct {
+	ufcUpdateService     ufcUpdateService
+	ufcAutomationService ufcAutomationService
+	ufcLibraryService    ufcLibraryService
+	ufcProcessingService ufcProcessingService
+	ufcDownloadService   ufcDownloadService
+	ufcSearchService     ufcSearchService
+	catalogueService     catalogueService
+	foundationService    foundationService
+	log                  zerolog.Logger
+	sse                  *sse.Server
+	db                   DatabaseHealth
+	server               *http.Server
+	listener             net.Listener
+
+	buildInfo      buildInfo
+	config         *config.AppConfig
+	allowedOrigins []string
+	sessionManager *scs.SessionManager
+
+	// authAllowedPeerPrefixes is parsed once at startup from
+	// config.AuthAllowedPeerCIDRs, rather than on every request.
+	authAllowedPeerPrefixes []netip.Prefix
+
+	// trustedProxyPrefixes is parsed once at startup from config.TrustedProxies
+	// and not used in modes with ProxyGuards.
+	trustedProxyPrefixes []netip.Prefix
+
+	// authAllowedOrigins, authAllowedHosts and authFrameAncestors are derived once
+	// at startup from config.CorsAllowedOrigins and config.AuthAllowedHosts, and
+	// only enforced in modes with ProxyGuards.
+	authAllowedOrigins map[string]struct{}
+	authAllowedHosts   map[string]struct{}
+	authFrameAncestors string
+
+	// healthCheckPaths holds the exact resolved paths (base URL included) that are
+	// reachable from loopback in modes with ProxyGuards.
+	healthCheckPaths []string
+
+	actionService       actionService
+	alertService        alertService
+	apiService          apikeyService
+	authService         authService
+	downloaderService   downloaderService
+	filterService       filterService
+	feedService         feedService
+	indexerService      indexerService
+	ircService          ircService
+	listService         listService
+	matrixService       matrixService
+	notificationService notificationService
+	oidcService         oidcService
+	proxyService        proxyService
+	releaseService      releaseService
+	updateService       updateService
+}
+
+type Deps struct {
+	UFCUpdateService     ufcUpdateService
+	UFCAutomationService ufcAutomationService
+	UFCLibraryService    ufcLibraryService
+	UFCProcessingService ufcProcessingService
+	UFCDownloadService   ufcDownloadService
+	UFCSearchService     ufcSearchService
+	CatalogueService     catalogueService
+	FoundationService    foundationService
+	Log                  zerolog.Logger
+	SSE                  *sse.Server
+	DB                   DatabaseHealth
+
+	Config         *config.AppConfig
+	SessionManager *scs.SessionManager
+
+	Version string
+	Commit  string
+	Date    string
+
+	ActionService       actionService
+	AlertService        alertService
+	ApiService          apikeyService
+	AuthService         authService
+	DownloaderService   downloaderService
+	FilterService       filterService
+	FeedService         feedService
+	IndexerService      indexerService
+	IrcService          ircService
+	ListService         listService
+	MatrixService       matrixService
+	NotificationService notificationService
+	OIDCService         oidcService
+	ProxyService        proxyService
+	ReleaseService      releaseService
+	UpdateService       updateService
+}
+
+func NewServer(deps Deps) *Server {
+	sessionManager := deps.SessionManager
+	sessionManager.Lifetime = 24 * time.Hour * 30
+	sessionManager.Cookie.Name = deps.Config.Config.Product.Slug() + "_user_session"
+	sessionManager.Cookie.Persist = false
+	sessionManager.Cookie.HttpOnly = true
+	sessionManager.Cookie.SameSite = http.SameSiteLaxMode
+	sessionManager.Cookie.Path = deps.Config.Config.BaseURL
+	sessionManager.Cookie.Secure = false
+
+	srv := &Server{
+		ufcUpdateService:     deps.UFCUpdateService,
+		ufcAutomationService: deps.UFCAutomationService,
+		ufcLibraryService:    deps.UFCLibraryService,
+		ufcProcessingService: deps.UFCProcessingService,
+		ufcDownloadService:   deps.UFCDownloadService,
+		ufcSearchService:     deps.UFCSearchService,
+		catalogueService:     deps.CatalogueService,
+		foundationService:    deps.FoundationService,
+		log:                  deps.Log.With().Str("module", "http").Logger(),
+		config:               deps.Config,
+		allowedOrigins: []string{
+			"*",
+			//"http://localhost:3000",
+			//"http://localhost:7474",
+			//"http://127.0.0.1:3000",
+			//"http://127.0.0.1:7474",
+		},
+		sse: deps.SSE,
+		db:  deps.DB,
+		buildInfo: buildInfo{
+			version: deps.Version,
+			commit:  deps.Commit,
+			date:    deps.Date,
+		},
+
+		sessionManager: sessionManager,
+
+		actionService:       deps.ActionService,
+		alertService:        deps.AlertService,
+		apiService:          deps.ApiService,
+		authService:         deps.AuthService,
+		downloaderService:   deps.DownloaderService,
+		filterService:       deps.FilterService,
+		feedService:         deps.FeedService,
+		indexerService:      deps.IndexerService,
+		ircService:          deps.IrcService,
+		listService:         deps.ListService,
+		matrixService:       deps.MatrixService,
+		notificationService: deps.NotificationService,
+		oidcService:         deps.OIDCService,
+		proxyService:        deps.ProxyService,
+		releaseService:      deps.ReleaseService,
+		updateService:       deps.UpdateService,
+	}
+
+	if deps.Config.Config.CorsAllowedOrigins != "*" {
+		srv.allowedOrigins = strings.Split(deps.Config.Config.CorsAllowedOrigins, ",")
+	}
+
+	if deps.Config.Config.AuthCapabilities().ProxyGuards {
+		prefixes, err := deps.Config.Config.ParseAuthAllowedPeerCIDRs()
+		if err != nil {
+			srv.log.Error().Err(err).Msg("proxy guard: invalid authAllowedPeerCIDRs, denying all requests")
+		} else {
+			srv.authAllowedPeerPrefixes = prefixes
+		}
+
+		if err := srv.buildAuthAllowlists(); err != nil {
+			srv.log.Error().Err(err).Msg("proxy guard: invalid corsAllowedOrigins or authAllowedHosts, denying requests by hostname")
+		}
+	} else if len(deps.Config.Config.TrustedProxies) > 0 {
+		prefixes, err := deps.Config.Config.ParseTrustedProxies()
+		if err != nil {
+			// an empty list trusts no peer, so forwarded headers are ignored rather
+			// than falling back to trusting everyone
+			srv.log.Error().Err(err).Msg("invalid trustedProxies, ignoring forwarded client IPs")
+			prefixes = []netip.Prefix{}
+		}
+
+		srv.trustedProxyPrefixes = prefixes
+	}
+
+	srv.healthCheckPaths = []string{
+		srv.routeBaseURL() + "api/healthz/liveness",
+		srv.routeBaseURL() + "api/healthz/readiness",
+	}
+
+	return srv
+}
+
+// limiterKey returns the address the login and OIDC limiters bucket on: the TCP
+// peer, or the client RealIPFromTrustedProxies resolved when that peer is a
+// trusted proxy, with IPv6 grouped by /64. The legacy RealIP rewrites r.RemoteAddr from headers any peer
+// may send, so a rewritten address is never trusted from an unknown peer.
+func (s *Server) limiterKey(r *http.Request) string {
+	peer, ok := peerAddrFromContext(r.Context())
+	if !ok {
+		// Only routers built without StorePeerAddr get here (unit tests), and
+		// those have no RealIP in front, so r.RemoteAddr is still the TCP peer.
+		if addr, ok := parsePeerAddr(r.RemoteAddr); ok {
+			return limiterBucket(addr)
+		}
+
+		return clientIP(r.RemoteAddr)
+	}
+
+	if isTrustedProxy(s.trustedProxyPrefixes, peer) {
+		if client, ok := parsePeerAddr(middleware.GetClientIP(r.Context())); ok {
+			return limiterBucket(client)
+		}
+	}
+
+	return limiterBucket(peer)
+}
+
+// buildAuthAllowlists derives the origin and host allowlists and the
+// frame-ancestors policy enforced in modes with ProxyGuards.
+func (s *Server) buildAuthAllowlists() error {
+	origins, err := s.config.Config.ParseAuthAllowedOrigins()
+	if err != nil {
+		return err
+	}
+
+	hosts, err := s.config.Config.ParseAuthAllowedHosts()
+	if err != nil {
+		return err
+	}
+
+	// The machine hostname is not attacker-controlled DNS, and admitting it
+	// keeps http://<hostname>:7474 working without configuration.
+	if name, err := os.Hostname(); err == nil {
+		if host, err := domain.NormalizeHost(name); err == nil {
+			hosts = append(hosts, host)
+		}
+	}
+
+	s.authAllowedOrigins = make(map[string]struct{}, len(origins))
+	s.authAllowedHosts = make(map[string]struct{}, len(origins)+len(hosts))
+	for _, origin := range origins {
+		s.authAllowedOrigins[origin] = struct{}{}
+		if _, host, ok := strings.Cut(origin, "://"); ok {
+			if host, err := domain.NormalizeHost(host); err == nil {
+				s.authAllowedHosts[host] = struct{}{}
+			}
+		}
+	}
+
+	for _, host := range hosts {
+		s.authAllowedHosts[host] = struct{}{}
+	}
+
+	// rs/cors matches origins verbatim, so hand it the normalized list the Origin
+	// check uses. An empty list would make rs/cors allow every origin.
+	if len(origins) > 0 {
+		s.allowedOrigins = origins
+	}
+
+	s.authFrameAncestors = strings.Join(append([]string{"frame-ancestors 'self'"}, origins...), " ")
+
+	return nil
+}
+
+// routeBaseURL returns the base path the routers are mounted under. It mirrors the
+// derivation in Handler(): legacy mode always mounts at "/", otherwise at the
+// configured base URL.
+func (s *Server) routeBaseURL() string {
+	if s.config.Config.BaseURLModeLegacy {
+		return "/"
+	}
+	return s.config.Config.BaseURL
+}
+
+// Listen binds the configured address. It returns before serving so a port
+// conflict fails startup instead of surfacing later.
+func (s *Server) Listen() error {
+	if s.listener != nil {
+		return nil
+	}
+	listener, err := listen(s.log, fmt.Sprintf("%v:%v", s.config.Config.Host, s.config.Config.Port))
+	if err != nil {
+		return err
+	}
+
+	s.listener = listener
+	s.server = &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: time.Second * 15,
+	}
+
+	s.log.Info().Str("addr", listener.Addr().String()).Msg("starting api server")
+
+	return nil
+}
+
+// Serve blocks until the server is shut down. It requires a prior Listen.
+func (s *Server) Serve() error {
+	if err := s.server.Serve(s.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+
+	return nil
+}
+
+// Shutdown ends the event streams first, since SSE handlers only return when
+// their stream closes and would otherwise hold Shutdown until ctx expires.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.server == nil {
+		return nil
+	}
+
+	s.sse.Close()
+
+	if err := s.server.Shutdown(ctx); err != nil {
+		_ = s.server.Close()
+
+		return errors.Wrap(err, "could not shut down gracefully")
+	}
+
+	return nil
+}
+
+// CloseListener releases the port when Serve never ran. Once Serve has run,
+// Shutdown already closed the listener and this is a no-op.
+func (s *Server) CloseListener(context.Context) error {
+	if s.listener == nil {
+		return nil
+	}
+
+	if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Server) Handler() http.Handler {
+	r := chi.NewRouter()
+
+	r.Use(hlog.NewHandler(s.log))
+	r.Use(hlog.RequestIDHandler("request_id", "X-Request-Id"))
+	// Both must run before RealIP so forwarded headers can neither bypass the
+	// allowlist nor pick the address the login limiters bucket on.
+	r.Use(StorePeerAddr)
+	r.Use(s.RequireAuthDisabledIPAllowlist)
+	r.Use(s.RequireAuthDisabledAllowedHost)
+	r.Use(s.RestrictAuthDisabledFraming)
+	if s.config.Config.AuthCapabilities().ProxyGuards {
+		// RealIP rewrites r.RemoteAddr from forwarded headers it trusts from any
+		// peer, so it stays off in this mode. If the operator names the header their
+		// proxy overwrites, resolve the client IP from it into the request context
+		// for logging; r.RemoteAddr keeps the real TCP peer either way.
+		if header := strings.TrimSpace(s.config.Config.AuthClientIPHeader); header != "" {
+			r.Use(middleware.ClientIPFromHeader(header))
+		}
+	} else if s.trustedProxyPrefixes != nil {
+		r.Use(RealIPFromTrustedProxies(s.trustedProxyPrefixes))
+	} else {
+		r.Use(middleware.RealIP)
+	}
+	r.Use(middleware.Recoverer)
+	r.Use(LoggerMiddleware(&s.log, s.healthCheckPaths))
+
+	c := cors.New(cors.Options{
+		AllowCredentials: true,
+		AllowedMethods:   []string{http.MethodHead, http.MethodOptions, http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete},
+		// Content-Type must be approved for cross-origin JSON writes to pass
+		// preflight, X-API-Token so allowlisted browser tools can authenticate
+		// with a header instead of ?apikey= in the URL.
+		AllowedHeaders:     []string{"Authorization", "Content-Type", "X-API-Token", "X-Requested-With"},
+		AllowedOrigins:     s.allowedOrigins,
+		OptionsPassthrough: true,
+		// Enable Debugging for testing, consider disabling in production
+		Debug: false,
+	})
+
+	r.Use(c.Handler)
+	r.Use(s.sessionMiddleware)
+
+	apiRouter := s.apiRoutes()
+
+	routeBaseURL := "/"
+
+	webRouter := chi.NewRouter()
+
+	// handle backwards compatibility for base url routing
+	if s.config.Config.BaseURLModeLegacy {
+		// this is required to keep assets "url rewritable" via a reverse-proxy
+		routeAssetBaseURL := "./"
+		// serve the web
+		webHandlers := newWebLegacyHandler(s.log, web.DistDirFS, s.buildInfo.version, s.config.Config.BaseURL, routeAssetBaseURL)
+		webHandlers.RegisterRoutes(webRouter)
+	} else {
+		routeBaseURL = s.config.Config.BaseURL
+
+		// serve the web
+		webHandlers := newWebHandler(s.log, web.DistDirFS, s.buildInfo.version, routeBaseURL, routeBaseURL)
+		webHandlers.RegisterRoutes(webRouter)
+
+		// add fallback routes when base url is set to inform user to redirect and use /baseurl/
+		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			if err := webHandlers.RenderFallbackIndex(w); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		})
+
+		r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			if err := webHandlers.RenderFallbackIndex(w); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		})
+	}
+
+	// Mount the web router under baseUrl + '/'
+	r.Mount(routeBaseURL, webRouter)
+	// Mount the API router under baseUrl + '/api'
+	r.Mount(routeBaseURL+"api", apiRouter)
+
+	return r
+}
+
+// apiRoutes builds the router mounted under /api. Every route behind IsAuthenticated declares the scope an API key
+// needs with requireScope, or requireUser for routes keys can never use.
+func (s *Server) apiRoutes() chi.Router {
+	encoder := newEncoder(s.log)
+
+	apiRouter := chi.NewRouter()
+	// API only, so cross-site navigations to the web shell keep working. Framing
+	// is limited separately by RestrictAuthDisabledFraming.
+	apiRouter.Use(s.RejectUntrustedBrowserRequests)
+	apiRouter.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if s.ufcUpdateService == nil || r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+				next.ServeHTTP(w, r)
+				return
+			}
+			ctx, release, ok := maintenance.Application.EnterContext(r.Context())
+			if !ok {
+				http.Error(w, "Application is preparing an update", http.StatusServiceUnavailable)
+				return
+			}
+			defer release()
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	apiRouter.Route("/auth", newAuthHandler(encoder, s.log, s, s.config.Config, s.sessionManager, s.authService, s.oidcService).Routes)
+	apiRouter.Route("/healthz", newHealthHandler(encoder, s.db).Routes)
+	apiRouter.Group(func(r chi.Router) {
+		r.Group(func(r chi.Router) {
+			r.Use(s.IsAuthenticated)
+
+			if s.foundationService != nil {
+				r.Route("/ufc", s.ufcRoutes(encoder))
+			}
+			r.Route("/actions", newActionHandler(encoder, s.actionService).Routes)
+			r.Route("/alerts", newAlertHandler(encoder, s.alertService).Routes)
+			r.Route("/config", newConfigHandler(encoder, s.buildInfo, s.config).Routes)
+			r.Route("/downloaders", newDownloaderHandler(encoder, s.downloaderService).Routes)
+			r.Route("/filters", newFilterHandler(encoder, s.filterService).Routes)
+			r.Route("/feeds", newFeedHandler(encoder, s.feedService).Routes)
+			r.Route("/irc", newIrcHandler(encoder, s.sse, s.ircService).Routes)
+			r.Route("/indexer", newIndexerHandler(encoder, s.indexerService, s.ircService).Routes)
+			r.Route("/lists", newListHandler(encoder, s.listService).Routes)
+			r.Route("/matrix", newMatrixHandler(encoder, s.sse, s.matrixService).Routes)
+			r.Route("/keys", newAPIKeyHandler(encoder, s.log, s.apiService, s.config.Config).Routes)
+			r.Route("/logs", newLogsHandler(s.config).Routes)
+			r.Route("/notification", newNotificationHandler(encoder, s.notificationService).Routes)
+			r.Route("/proxy", newProxyHandler(encoder, s.proxyService).Routes)
+			r.Route("/release", newReleaseHandler(encoder, s.releaseService).Routes)
+			r.Route("/updates", newUpdateHandler(encoder, s.updateService).Routes)
+			r.Route("/webhook", newWebhookHandler(encoder, s.listService).Routes)
+
+			r.With(requireStreamAccess).HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+
+				// inject CORS headers to bypass checks
+				s.sse.Headers = map[string]string{
+					"Content-Type":      "text/event-stream",
+					"Cache-Control":     "no-cache",
+					"Connection":        "keep-alive",
+					"X-Accel-Buffering": "no",
+				}
+
+				s.sse.ServeHTTP(w, r)
+			})
+		})
+	})
+
+	return apiRouter
+}

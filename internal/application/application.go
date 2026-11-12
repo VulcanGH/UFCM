@@ -1,0 +1,697 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package application
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/autobrr/autobrr/internal/action"
+	"github.com/autobrr/autobrr/internal/alert"
+	"github.com/autobrr/autobrr/internal/api"
+	"github.com/autobrr/autobrr/internal/auth"
+	"github.com/autobrr/autobrr/internal/config"
+	"github.com/autobrr/autobrr/internal/database"
+	"github.com/autobrr/autobrr/internal/diagnostics"
+	"github.com/autobrr/autobrr/internal/domain"
+	"github.com/autobrr/autobrr/internal/downloader"
+	"github.com/autobrr/autobrr/internal/events"
+	"github.com/autobrr/autobrr/internal/feed"
+	"github.com/autobrr/autobrr/internal/filter"
+	"github.com/autobrr/autobrr/internal/http"
+	"github.com/autobrr/autobrr/internal/indexer"
+	"github.com/autobrr/autobrr/internal/irc"
+	"github.com/autobrr/autobrr/internal/list"
+	"github.com/autobrr/autobrr/internal/logger"
+	"github.com/autobrr/autobrr/internal/matrix"
+	"github.com/autobrr/autobrr/internal/meta"
+	"github.com/autobrr/autobrr/internal/metrics"
+	"github.com/autobrr/autobrr/internal/notification"
+	"github.com/autobrr/autobrr/internal/proxy"
+	"github.com/autobrr/autobrr/internal/release"
+	"github.com/autobrr/autobrr/internal/scheduler"
+	"github.com/autobrr/autobrr/internal/ufc/acquisition"
+	"github.com/autobrr/autobrr/internal/ufc/automation"
+	"github.com/autobrr/autobrr/internal/ufc/catalogue"
+	ufcdatabase "github.com/autobrr/autobrr/internal/ufc/database"
+	"github.com/autobrr/autobrr/internal/ufc/foundation"
+	"github.com/autobrr/autobrr/internal/ufc/library"
+	"github.com/autobrr/autobrr/internal/ufc/processing"
+	ufcsearch "github.com/autobrr/autobrr/internal/ufc/search"
+	"github.com/autobrr/autobrr/internal/ufc/updater"
+	"github.com/autobrr/autobrr/internal/update"
+	"github.com/autobrr/autobrr/internal/user"
+	"github.com/autobrr/autobrr/pkg/errors"
+	"github.com/autobrr/autobrr/pkg/featureflags"
+	"github.com/autobrr/autobrr/pkg/sqlite3store"
+	"github.com/autobrr/autobrr/pkg/version"
+
+	"github.com/KimMachineGun/automemlimit/memlimit"
+	"github.com/alexedwards/scs/postgresstore"
+	"github.com/alexedwards/scs/v2"
+	"github.com/dcarbone/zadapters/zstdlog"
+	"github.com/r3labs/sse/v2"
+	"github.com/rs/zerolog"
+	"go.uber.org/automaxprocs/maxprocs"
+)
+
+func init() {
+	featureflags.Register(domain.IRCFuzzyAnnouncer, false)
+}
+
+// App owns the lifecycle of every service, from config load to shutdown.
+type App struct {
+	ufcUpdateService   *updater.Service
+	updateShutdown     func()
+	automationService  *automation.Service
+	libraryService     *library.Service
+	processingService  *processing.Service
+	acquisitionService *acquisition.Service
+	catalogueService   *catalogue.Service
+	foundationService  *foundation.Service
+	log                zerolog.Logger
+	cfg                *config.AppConfig
+	sse                *sse.Server
+	eventBus           *events.EventBus
+	updateService      *update.Service
+	ready              chan struct{}
+
+	db            *database.DB
+	httpServer    *http.Server
+	metricsServer *http.MetricsServer
+	profiler      *diagnostics.Profiler
+
+	actionService       *action.Service
+	alertService        *alert.Service
+	authService         *auth.Service
+	apiService          *api.Service
+	downloaderService   *downloader.Service
+	indexerService      *indexer.Service
+	indexerAPIService   *indexer.APIService
+	ircService          *irc.Service
+	feedService         *feed.Service
+	filterService       *filter.Service
+	notificationService *notification.Service
+	releaseService      *release.Service
+	rlsDownloadService  *release.DownloadService
+	scheduler           *scheduler.Service
+	listService         *list.Service
+	matrixService       *matrix.Service
+	metricsManager      *metrics.Manager
+	proxyService        *proxy.Service
+	userService         *user.Service
+}
+
+// New loads the config at configPath and returns NewFromConfig for it.
+func New(configPath string) *App {
+	return NewFromConfig(config.New(configPath))
+}
+
+// NewFromConfig builds the parts that need no database. They exist before Run
+// so a host such as the tray can subscribe to events and check for updates
+// while the rest of the application starts. A host that needs different
+// defaults adjusts cfg before calling it, since the logger is built here.
+func NewFromConfig(cfg *config.AppConfig) *App {
+	serverEvents := sse.New()
+	serverEvents.Headers = map[string]string{
+		"Content-Type":      "text/event-stream",
+		"Cache-Control":     "no-cache",
+		"Connection":        "keep-alive",
+		"X-Accel-Buffering": "no",
+	}
+	serverEvents.CreateStreamWithOpts(logger.StreamLogs, sse.StreamOpts{MaxEntries: 1000, AutoReplay: true})
+	serverEvents.CreateStreamWithOpts("irc", sse.StreamOpts{MaxEntries: 0, AutoReplay: false, AutoStream: true})
+	serverEvents.CreateStreamWithOpts(matrix.EventStreamKey, sse.StreamOpts{MaxEntries: 0, AutoReplay: false, AutoStream: true})
+	serverEvents.CreateStreamWithOpts(notification.InboxStreamKey, sse.StreamOpts{MaxEntries: 0, AutoReplay: false})
+
+	log := logger.New(cfg.Config, serverEvents)
+
+	cfg.DynamicReload(log)
+
+	eventBus := events.NewEventBus(log)
+
+	return &App{
+		log:           log,
+		cfg:           cfg,
+		sse:           serverEvents,
+		eventBus:      eventBus,
+		updateService: update.NewUpdate(log, eventBus, cfg.Config),
+		ready:         make(chan struct{}),
+	}
+}
+
+// Run starts the application and blocks until ctx is cancelled or one of its
+// servers exits unexpectedly, then shuts everything down. Cancelling ctx is a
+// clean shutdown and returns nil, also while still starting. An App runs once,
+// a host that restarts it builds a new one with New.
+func (app *App) Run(ctx context.Context) error {
+	if app.cfg.Config.Product.IsUFC() {
+		if updater.ManagedRoot() == "" {
+			if exe, err := os.Executable(); err == nil && filepath.Base(filepath.Dir(filepath.Dir(exe))) == "versions" {
+				if _, err := os.Stat(filepath.Join(filepath.Dir(exe), "release.json")); err == nil {
+					return errors.New("start managed runtimes through the UFC Manager launcher")
+				}
+			}
+		}
+		if updater.ManagedRoot() == "" {
+			unlock, err := updater.Lock(app.cfg.Config.ConfigPath)
+			if err != nil {
+				return errors.Wrap(err, "configuration is in use")
+			}
+			defer unlock()
+		}
+		unlock, err := updater.RuntimeLock(app.cfg.Config.ConfigPath)
+		if err != nil {
+			return errors.Wrap(err, "configuration is in use")
+		}
+		defer unlock()
+		if err := updater.CheckMaintenance(app.cfg.Config.ConfigPath); err != nil {
+			return err
+		}
+	}
+	// the event streams outlive a failed start, which never reaches the http
+	// shutdown that normally closes them
+	defer app.sse.Close()
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	if err := app.setup(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		return err
+	}
+
+	defer func() {
+		if err := app.db.Close(); err != nil {
+			app.log.Error().Err(err).Msg("could not close database")
+		}
+	}()
+
+	runCtx, fail := context.WithCancelCause(ctx)
+	defer fail(nil)
+	if app.cfg.Config.Product.IsUFC() && os.Getenv("UFC_MANAGER_BOOTSTRAP_ADDR") != "" {
+		if err := app.httpServer.Listen(); err != nil {
+			return err
+		}
+		databasePath := ""
+		if app.db.Driver == "sqlite" {
+			databasePath, _ = filepath.Abs(app.db.DSN)
+		}
+		if err := updater.HostReady(ctx, updater.Host{Version: meta.GetVersion(), Driver: app.db.Driver, Database: databasePath, Config: app.cfg.Config.ConfigPath}); err != nil {
+			_ = app.httpServer.CloseListener(context.Background())
+			return errors.Wrap(err, "launcher activation failed")
+		}
+	}
+
+	started, err := app.startComponents(runCtx, app.components(fail))
+	if err != nil {
+		fail(err)
+	} else {
+		close(app.ready)
+	}
+
+	<-runCtx.Done()
+
+	app.log.Info().Msg("shutting down")
+
+	app.stopComponents(started)
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	return context.Cause(runCtx)
+}
+
+func (app *App) components(fail context.CancelCauseFunc) []component {
+	var components []component
+	if app.catalogueService != nil {
+		components = append(components, component{name: "UFC catalogue", start: app.catalogueService.Start, stop: app.catalogueService.Stop})
+	}
+	if app.acquisitionService != nil {
+		components = append(components, component{name: "UFC downloads", start: app.acquisitionService.Start, stop: app.acquisitionService.Stop})
+	}
+	if app.libraryService != nil {
+		components = append(components, component{name: "UFC library", start: app.libraryService.Start, stop: app.libraryService.Stop})
+	}
+	if app.processingService != nil {
+		components = append(components, component{name: "UFC processing", start: app.processingService.Start, stop: app.processingService.Stop})
+	}
+
+	if app.profiler != nil {
+		components = append(components, component{
+			name:     "profiler",
+			optional: true,
+			start: func(context.Context) error {
+				if err := app.profiler.Listen(); err != nil {
+					return err
+				}
+
+				serve(app.profiler.Serve, func(err error) {
+					app.log.Error().Err(err).Str("component", "profiler").Msg("server stopped unexpectedly")
+				})
+
+				return nil
+			},
+			stop: app.profiler.Shutdown,
+		})
+	}
+
+	components = append(components,
+		// bind before anything dials out so a port conflict fails startup early,
+		// serving waits until the services behind the API have started
+		component{
+			name: "http listen",
+			start: func(context.Context) error {
+				return app.httpServer.Listen()
+			},
+			stop: app.httpServer.CloseListener,
+		},
+		component{
+			name:  "scheduler",
+			start: app.scheduler.Start,
+			stop:  app.scheduler.Stop,
+		},
+		component{
+			name:     "notifications",
+			optional: true,
+			start: func(context.Context) error {
+				return app.notificationService.Start()
+			},
+		},
+		component{
+			name: "indexers",
+			start: func(context.Context) error {
+				return app.indexerService.Start()
+			},
+		},
+		component{
+			name: "irc",
+			start: func(context.Context) error {
+				app.ircService.StartHandlers()
+
+				return nil
+			},
+			stop: func(ctx context.Context) error {
+				app.ircService.StopHandlers(ctx)
+
+				return nil
+			},
+		},
+		component{
+			name:     "matrix",
+			optional: true,
+			start:    app.matrixService.StartHandlers,
+			stop: func(ctx context.Context) error {
+				app.matrixService.StopHandlers(ctx)
+
+				return nil
+			},
+		},
+		component{
+			name:     "feeds",
+			optional: true,
+			start: func(context.Context) error {
+				return app.feedService.Start()
+			},
+		},
+		component{
+			name:     "release cleanup",
+			optional: true,
+			start: func(context.Context) error {
+				return app.releaseService.StartCleanupJobs()
+			},
+		},
+		component{
+			name: "lists",
+			start: func(context.Context) error {
+				go func() {
+					if err := app.listService.Start(); err != nil {
+						app.log.Error().Err(err).Msg("could not start list service")
+					}
+				}()
+
+				return nil
+			},
+		},
+		// last to start so it stops first, before the services its handlers call
+		component{
+			name: "http",
+			start: func(context.Context) error {
+				serve(app.httpServer.Serve, func(err error) {
+					fail(errors.Wrap(err, "http server stopped unexpectedly"))
+				})
+
+				return nil
+			},
+			stop: app.httpServer.Shutdown,
+		},
+	)
+
+	if app.metricsServer != nil {
+		components = append(components, component{
+			name:     "metrics",
+			optional: true,
+			start: func(context.Context) error {
+				if err := app.metricsServer.Listen(); err != nil {
+					return err
+				}
+
+				serve(app.metricsServer.Serve, func(err error) {
+					app.log.Error().Err(err).Str("component", "metrics").Msg("server stopped unexpectedly")
+				})
+
+				return nil
+			},
+			stop: app.metricsServer.Shutdown,
+		})
+	}
+
+	if app.cfg.Config.CheckForUpdates {
+		components = append(components, component{
+			name: "update check",
+			start: func(ctx context.Context) error {
+				go app.checkUpdates(ctx)
+
+				return nil
+			},
+		})
+	}
+
+	if app.automationService != nil {
+		components = append(components, component{name: "UFC automation", start: app.automationService.Start, stop: app.automationService.Stop})
+	}
+	if app.ufcUpdateService != nil {
+		components = append(components, component{name: "UFC updates", start: app.ufcUpdateService.Start, stop: app.ufcUpdateService.Stop})
+	}
+	return components
+}
+
+// Ready is closed once every component has started and the web UI is serving.
+// It stays open when startup fails.
+func (app *App) Ready() <-chan struct{} {
+	return app.ready
+}
+
+// Config returns the loaded configuration.
+func (app *App) Config() *domain.Config {
+	return app.cfg.Config
+}
+
+// Log returns the application logger.
+func (app *App) Log() *zerolog.Logger {
+	return &app.log
+}
+
+// CheckUpdateAvailable checks for a newer release. It is safe to call before Run.
+func (app *App) CheckUpdateAvailable(ctx context.Context) (*version.Release, error) {
+	return app.updateService.CheckUpdateAvailable(ctx)
+}
+
+// OnAppUpdate subscribes to new-release events and returns the unsubscribe func.
+func (app *App) OnAppUpdate(handler func(context.Context, events.AppUpdateEvent) error) func() {
+	return app.eventBus.OnAppUpdate(handler)
+}
+
+func (app *App) setupResourceLimits() {
+	// the returned undo is dropped on purpose, the limit holds for the process lifetime
+	if _, err := maxprocs.Set(maxprocs.Logger(zstdlog.NewStdLoggerWithLevel(app.log.With().Logger(), zerolog.InfoLevel).Printf)); err != nil {
+		app.log.Error().Err(err).Msg("failed to set GOMAXPROCS")
+	}
+
+	memLimit, err := memlimit.Set(memlimit.WithProvider(memlimit.ApplyFallback(memlimit.FromCgroup, memlimit.FromSystem)))
+	if err != nil {
+		app.log.Error().Err(err).Msg("failed to set GOMEMLIMIT")
+	}
+
+	app.log.Debug().Int64("gomemlimit_bytes", memLimit).Msg("memory limit configured")
+}
+
+func (app *App) checkAuthConfig() error {
+	cfg := app.cfg.Config
+
+	if err := cfg.ValidateAuthConfig(); err != nil {
+		return errors.Wrap(err, "invalid configuration for %s authentication mode", cfg.AuthMode())
+	}
+
+	switch {
+	case cfg.AuthMode() == domain.AuthModeForward:
+		wildcardBind := cfg.Host == "" || cfg.Host == "0.0.0.0" || cfg.Host == "::"
+		app.log.Info().
+			Str("host", cfg.Host).
+			Int("port", cfg.Port).
+			Bool("wildcard_bind", wildcardBind).
+			Str("cors_allowed_origins", cfg.CorsAllowedOrigins).
+			Str("authTrustedUserHeader", cfg.AuthTrustedUserHeader).
+			Str("authTrustedUser", cfg.AuthTrustedUser).
+			Strs("authAllowedPeerCIDRs", cfg.AuthAllowedPeerCIDRs).
+			Strs("authAllowedHosts", cfg.AuthAllowedHosts).
+			Str("authClientIPHeader", cfg.AuthClientIPHeader).
+			Msg("forward authentication active: authTrustedUser is identified by authTrustedUserHeader, read only from peers in authAllowedPeerCIDRs. The reverse proxy must authenticate every request and overwrite that header.")
+	case cfg.AuthMode() == domain.AuthModeDisabled:
+		wildcardBind := cfg.Host == "" || cfg.Host == "0.0.0.0" || cfg.Host == "::"
+		app.log.Warn().
+			Str("host", cfg.Host).
+			Int("port", cfg.Port).
+			Bool("wildcard_bind", wildcardBind).
+			Str("cors_allowed_origins", cfg.CorsAllowedOrigins).
+			Strs("authAllowedPeerCIDRs", cfg.AuthAllowedPeerCIDRs).
+			Strs("authAllowedHosts", cfg.AuthAllowedHosts).
+			Str("authClientIPHeader", cfg.AuthClientIPHeader).
+			Msg("SECURITY: built-in authentication is DISABLED. Access is restricted only to the immediate network peer matching authAllowedPeerCIDRs. Ensure autobrr sits behind a reverse proxy that performs authentication.")
+
+		if prefixes, err := cfg.ParseAuthAllowedPeerCIDRs(); err == nil {
+			for _, p := range prefixes {
+				if p.Bits() < p.Addr().BitLen() {
+					app.log.Warn().Str("cidr", p.String()).Msg("authAllowedPeerCIDRs entry grants every address in the range full administrative access; prefer the exact reverse-proxy address as a /32 or /128")
+				}
+			}
+		}
+	case cfg.AuthDisabled:
+		app.log.Warn().
+			Str("acknowledgement_value", domain.AuthDisabledAcknowledgementValue).
+			Msg("authDisabled is set but the acknowledgement is missing or invalid; authentication remains enabled. Set AUTOBRR__AUTH_DISABLED_ACKNOWLEDGEMENT (or authDisabledAcknowledgement) to acknowledgement_value to disable authentication.")
+	}
+
+	return nil
+}
+
+func (app *App) setup(ctx context.Context) error {
+	app.setupResourceLimits()
+
+	oidcService := auth.NewOIDCService(app.log, app.cfg.Config)
+	if err := oidcService.Discover(ctx); err != nil {
+		return errors.Wrap(err, "could not discover OIDC service")
+	}
+
+	db, err := database.NewDB(app.cfg.Config, app.log)
+	if err != nil {
+		return errors.Wrap(err, "could not init database")
+	}
+
+	if err := db.Open(); err != nil {
+		return errors.Wrap(err, "could not open database")
+	}
+
+	app.db = db
+	if app.cfg.Config.Product.IsUFC() {
+		repository := ufcdatabase.New(db.Handler, db.Driver, app.log)
+		if app.cfg.Config.DatabaseAutoMigrate {
+			if err := repository.Migrate(ctx); err != nil {
+				if closeErr := db.Close(); closeErr != nil {
+					app.log.Error().Err(closeErr).Msg("could not close database after UFC startup failure")
+				}
+				return err
+			}
+		}
+		app.foundationService = foundation.New(repository, app.cfg.Config.Product)
+		if _, err := app.foundationService.Status(ctx); err != nil {
+			if closeErr := db.Close(); closeErr != nil {
+				app.log.Error().Err(closeErr).Msg("could not close database after UFC startup failure")
+			}
+			return err
+		}
+		app.catalogueService = catalogue.New(repository, catalogue.NewWikipedia(), app.log)
+		if _, err := app.catalogueService.Status(ctx); err != nil {
+			if closeErr := db.Close(); closeErr != nil {
+				app.log.Error().Err(closeErr).Msg("could not close database after catalogue startup failure")
+			}
+			return err
+		}
+	}
+
+	app.log.Info().
+		Str("product", app.cfg.Config.Product.Slug()).
+		Str("version", meta.GetVersion()).
+		Str("commit", meta.GetCommit()).
+		Str("build_date", meta.GetDate()).
+		Str("log_level", app.cfg.Config.LogLevel).
+		Str("database", db.Driver).
+		Msg("starting application")
+
+	if err := app.checkAuthConfig(); err != nil {
+		return err
+	}
+
+	sessionManager := scs.New()
+	switch db.Driver {
+	case database.DriverSQLite:
+		sessionManager.Store = sqlite3store.New(db, sqlite3store.WithLogger(app.log.With().Str("module", "session-store").Logger()))
+	case database.DriverPostgres:
+		sessionManager.Store = postgresstore.New(db.Handler)
+	}
+
+	var (
+		apikeyRepo       = database.NewAPIRepo(app.log, db)
+		downloaderRepo   = database.NewDownloaderRepo(app.log, db)
+		actionRepo       = database.NewActionRepo(app.log, db)
+		filterRepo       = database.NewFilterRepo(app.log, db)
+		feedRepo         = database.NewFeedRepo(app.log, db)
+		feedCacheRepo    = database.NewFeedCacheRepo(app.log, db)
+		indexerRepo      = database.NewIndexerRepo(app.log, db)
+		ircRepo          = database.NewIrcRepo(app.log, db)
+		listRepo         = database.NewListRepo(app.log, db)
+		matrixRepo       = database.NewMatrixRepo(app.log, db)
+		notificationRepo = database.NewNotificationRepo(app.log, db)
+		inboxRepo        = database.NewNotificationInboxRepo(app.log, db)
+		releaseRepo      = database.NewReleaseRepo(app.log, db)
+		userRepo         = database.NewUserRepo(app.log, db)
+		proxyRepo        = database.NewProxyRepo(app.log, db)
+	)
+
+	app.apiService = api.NewService(app.log, apikeyRepo)
+	app.scheduler = scheduler.NewService(app.log, app.cfg.Config, app.updateService)
+	app.notificationService = notification.NewService(app.log, app.eventBus, app.sse, notificationRepo, inboxRepo, app.scheduler)
+	app.userService = user.NewService(userRepo)
+	app.authService = auth.NewService(app.log, app.userService)
+	app.proxyService = proxy.NewService(app.log, app.eventBus, proxyRepo)
+	app.indexerAPIService = indexer.NewAPIService(app.log, app.proxyService)
+	app.rlsDownloadService = release.NewDownloadService(app.log, indexerRepo, app.proxyService)
+	app.downloaderService = downloader.NewService(app.log, downloaderRepo)
+	app.actionService = action.NewService(app.log, app.eventBus, actionRepo, app.downloaderService, app.rlsDownloadService)
+	app.indexerService = indexer.NewService(app.log, app.eventBus, app.cfg.Config, indexerRepo, releaseRepo, app.indexerAPIService)
+	app.filterService = filter.NewService(app.log, filterRepo, app.actionService, releaseRepo, app.indexerAPIService, app.indexerService, app.rlsDownloadService, app.notificationService)
+	app.releaseService = release.NewService(app.log, app.eventBus, releaseRepo, app.actionService, app.filterService, app.indexerService, app.scheduler)
+	app.ircService = irc.NewService(app.log, app.eventBus, app.sse, ircRepo, app.releaseService, app.indexerService, app.proxyService)
+	app.matrixService = matrix.NewService(app.log, app.sse, matrixRepo, app.releaseService, app.indexerService)
+	app.feedService = feed.NewService(app.log, app.eventBus, feedRepo, feedCacheRepo, app.releaseService, app.proxyService, app.scheduler)
+	app.listService = list.NewService(app.log, app.eventBus, listRepo, app.downloaderService, app.filterService, app.scheduler)
+	app.alertService = alert.NewService(app.log, app.eventBus, app.cfg.Config, app.sse, app.updateService, app.ircService, app.listService)
+
+	httpDeps := http.Deps{
+		Log:                 app.log,
+		SSE:                 app.sse,
+		DB:                  db,
+		Config:              app.cfg,
+		SessionManager:      sessionManager,
+		Version:             meta.GetVersion(),
+		Commit:              meta.GetCommit(),
+		Date:                meta.GetDate(),
+		ActionService:       app.actionService,
+		AlertService:        app.alertService,
+		ApiService:          app.apiService,
+		AuthService:         app.authService,
+		DownloaderService:   app.downloaderService,
+		FilterService:       app.filterService,
+		FeedService:         app.feedService,
+		IndexerService:      app.indexerService,
+		IrcService:          app.ircService,
+		ListService:         app.listService,
+		MatrixService:       app.matrixService,
+		NotificationService: app.notificationService,
+		OIDCService:         oidcService,
+		ProxyService:        app.proxyService,
+		ReleaseService:      app.releaseService,
+		UpdateService:       app.updateService,
+	}
+	if app.foundationService != nil {
+		httpDeps.FoundationService = app.foundationService
+		httpDeps.CatalogueService = app.catalogueService
+		searchService := ufcsearch.New(app.catalogueService, app.feedService)
+		httpDeps.UFCSearchService = searchService
+		app.acquisitionService = acquisition.New(ufcdatabase.New(db.Handler, db.Driver, app.log), searchService, app.catalogueService, acquisition.NewGateway(app.downloaderService), app.log)
+		httpDeps.UFCDownloadService = app.acquisitionService
+		app.libraryService = library.New(ufcdatabase.New(db.Handler, db.Driver, app.log))
+		httpDeps.UFCLibraryService = app.libraryService
+		app.processingService = processing.New(ufcdatabase.New(db.Handler, db.Driver, app.log), app.downloaderService)
+		app.acquisitionService.SetCompletionHandoff(app.processingService)
+		httpDeps.UFCProcessingService = app.processingService
+		app.automationService = automation.New(ufcdatabase.New(db.Handler, db.Driver, app.log), app.catalogueService, searchService, app.acquisitionService, app.notificationService, app.log)
+		app.feedService.SetPageObserver(app.automationService.ObserveFeed)
+		httpDeps.UFCAutomationService = app.automationService
+		repo := ufcdatabase.New(db.Handler, db.Driver, app.log)
+		app.ufcUpdateService = updater.New(repo, meta.GetVersion(), db.Driver, db.DSN, app.cfg.Config.ConfigPath, func(ctx context.Context, root string) error {
+			if err := updater.SafeDirectory(root); err != nil {
+				return err
+			}
+			settings, err := repo.LibrarySettings(ctx)
+			if err != nil {
+				return err
+			}
+			for _, media := range settings.Roots {
+				if err := updater.Disjoint(root, media.Path); err != nil {
+					return err
+				}
+			}
+			processing, err := repo.ProcessingSettings(ctx)
+			if err != nil {
+				return err
+			}
+			for _, media := range processing.SourceRoots {
+				if err := updater.Disjoint(root, media); err != nil {
+					return err
+				}
+			}
+			if err := updater.Disjoint(root, filepath.Clean(app.cfg.Config.ConfigPath)); err != nil {
+				return err
+			}
+			return nil
+		})
+		app.ufcUpdateService.SetShutdown(app.updateShutdown)
+		httpDeps.UFCUpdateService = app.ufcUpdateService
+	}
+	app.httpServer = http.NewServer(httpDeps)
+
+	if app.cfg.Config.MetricsEnabled {
+		app.metricsManager = metrics.NewMetricsManager(meta.GetVersion(), meta.GetCommit(), meta.GetDate(), app.releaseService, app.ircService, app.feedService, app.listService, app.filterService)
+		app.metricsServer = http.NewMetricsServer(app.log, app.cfg, meta.GetVersion(), meta.GetCommit(), meta.GetDate(), app.metricsManager)
+	}
+
+	if app.cfg.Config.ProfilingEnabled {
+		app.profiler = diagnostics.NewProfiler(app.cfg)
+	}
+
+	return nil
+}
+
+func (app *App) checkUpdates(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(5 * time.Second):
+	}
+
+	app.updateService.CheckUpdates(ctx)
+}
+
+func PrintVersion() {
+	fmt.Println(meta.GetMetaStr())
+}
+
+func PrintVersionJSON() {
+	bytes, err := json.Marshal(meta.GetMetaInfo())
+	if err != nil {
+		return
+	}
+
+	fmt.Println(string(bytes))
+}

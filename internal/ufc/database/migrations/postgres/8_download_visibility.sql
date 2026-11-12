@@ -1,0 +1,1 @@
+ALTER TABLE ufc_acquisitions ADD COLUMN dismissed BOOLEAN NOT NULL DEFAULT FALSE;

@@ -1,0 +1,363 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package database
+
+import (
+	"context"
+	"database/sql"
+	"time"
+
+	"github.com/autobrr/autobrr/internal/domain"
+	"github.com/autobrr/autobrr/pkg/errors"
+
+	sq "github.com/Masterminds/squirrel"
+	"github.com/rs/zerolog"
+)
+
+type ProxyRepo struct {
+	log zerolog.Logger
+	db  *DB
+}
+
+func NewProxyRepo(log zerolog.Logger, db *DB) *ProxyRepo {
+	return &ProxyRepo{
+		log: log.With().Str("repo", "proxy").Logger(),
+		db:  db,
+	}
+}
+
+func (r *ProxyRepo) Store(ctx context.Context, p *domain.Proxy) error {
+	queryBuilder := r.db.squirrel.
+		Insert("proxy").
+		Columns(
+			"enabled",
+			"name",
+			"type",
+			"addr",
+			"auth_user",
+			"auth_pass",
+			"timeout",
+		).
+		Values(
+			p.Enabled,
+			p.Name,
+			p.Type,
+			toNullString(p.Addr),
+			toNullString(p.User),
+			toNullString(p.Pass),
+			p.Timeout,
+		).
+		Suffix("RETURNING id").
+		RunWith(r.db.Handler)
+
+	var retID int64
+	err := queryBuilder.QueryRowContext(ctx).Scan(&retID)
+	if err != nil {
+		return errors.Wrap(err, "error executing query")
+	}
+
+	p.ID = retID
+
+	return nil
+}
+
+func (r *ProxyRepo) Update(ctx context.Context, p *domain.Proxy) error {
+	queryBuilder := r.db.squirrel.
+		Update("proxy").
+		Set("enabled", p.Enabled).
+		Set("name", p.Name).
+		Set("type", p.Type).
+		Set("addr", p.Addr).
+		Set("auth_user", toNullString(p.User)).
+		Set("auth_pass", toNullString(p.Pass)).
+		Set("timeout", p.Timeout).
+		Set("updated_at", time.Now().Format(time.RFC3339)).
+		Where(sq.Eq{"id": p.ID})
+
+	query, args, err := queryBuilder.ToSql()
+	if err != nil {
+		return errors.Wrap(err, "error building query")
+	}
+
+	// update record
+	res, err := r.db.Handler.ExecContext(ctx, query, args...)
+	if err != nil {
+		return errors.Wrap(err, "error executing query")
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "error getting affected rows")
+	}
+
+	if rowsAffected == 0 {
+		return domain.ErrUpdateFailed
+	}
+
+	return err
+}
+
+func (r *ProxyRepo) List(ctx context.Context) ([]domain.Proxy, error) {
+	queryBuilder := r.db.squirrel.
+		Select(
+			"id",
+			"enabled",
+			"name",
+			"type",
+			"addr",
+			"auth_user",
+			"auth_pass",
+			"timeout",
+		).
+		From("proxy").
+		OrderBy("name ASC")
+
+	query, args, err := queryBuilder.ToSql()
+	if err != nil {
+		return nil, errors.Wrap(err, "error building query")
+	}
+
+	rows, err := r.db.Handler.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, errors.Wrap(err, "error executing query")
+	}
+
+	defer rows.Close()
+
+	proxies := make([]domain.Proxy, 0)
+	for rows.Next() {
+		var proxy domain.Proxy
+
+		var user, pass sql.NullString
+
+		if err := rows.Scan(&proxy.ID, &proxy.Enabled, &proxy.Name, &proxy.Type, &proxy.Addr, &user, &pass, &proxy.Timeout); err != nil {
+			return nil, errors.Wrap(err, "error scanning row")
+		}
+
+		proxy.User = user.String
+		proxy.Pass = pass.String
+
+		proxies = append(proxies, proxy)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return nil, errors.Wrap(err, "error row")
+	}
+
+	return proxies, nil
+}
+
+func (r *ProxyRepo) Delete(ctx context.Context, id int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.Wrap(err, "error begin transaction")
+	}
+
+	defer tx.Rollback()
+
+	if err := r.detachReferences(ctx, tx, id); err != nil {
+		return err
+	}
+
+	queryBuilder := r.db.squirrel.
+		Delete("proxy").
+		Where(sq.Eq{"id": id})
+
+	query, args, err := queryBuilder.ToSql()
+	if err != nil {
+		return errors.Wrap(err, "error building query")
+	}
+
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return errors.Wrap(err, "error executing query")
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "error getting affected rows")
+	}
+
+	if rowsAffected == 0 {
+		return domain.ErrDeleteFailed
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return errors.Wrap(err, "error commit deleting proxy")
+	}
+
+	return nil
+}
+
+// detachReferences clears the proxy from every indexer and irc network pointing at it: SQLite
+// does not enforce the ON DELETE SET NULL constraint, and Postgres leaves use_proxy set.
+func (r *ProxyRepo) detachReferences(ctx context.Context, tx *Tx, id int64) error {
+	for _, table := range []string{"indexer", "irc_network"} {
+		queryBuilder := r.db.squirrel.
+			Update(table).
+			Set("use_proxy", false).
+			Set("proxy_id", nil).
+			Set("updated_at", sq.Expr("CURRENT_TIMESTAMP")).
+			Where(sq.Eq{"proxy_id": id})
+
+		query, args, err := queryBuilder.ToSql()
+		if err != nil {
+			return errors.Wrap(err, "error building query")
+		}
+
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return errors.Wrap(err, "error detaching proxy from %s", table)
+		}
+	}
+
+	return nil
+}
+
+func (r *ProxyRepo) FindByID(ctx context.Context, id int64) (*domain.Proxy, error) {
+	queryBuilder := r.db.squirrel.
+		Select(
+			"id",
+			"enabled",
+			"name",
+			"type",
+			"addr",
+			"auth_user",
+			"auth_pass",
+			"timeout",
+		).
+		From("proxy").
+		OrderBy("name ASC").
+		Where(sq.Eq{"id": id})
+
+	query, args, err := queryBuilder.ToSql()
+	if err != nil {
+		return nil, errors.Wrap(err, "error building query")
+	}
+
+	row := r.db.Handler.QueryRowContext(ctx, query, args...)
+	if err := row.Err(); err != nil {
+		return nil, errors.Wrap(err, "error executing query")
+	}
+
+	var proxy domain.Proxy
+
+	var user, pass sql.NullString
+
+	err = row.Scan(&proxy.ID, &proxy.Enabled, &proxy.Name, &proxy.Type, &proxy.Addr, &user, &pass, &proxy.Timeout)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, domain.ErrRecordNotFound
+		}
+
+		return nil, errors.Wrap(err, "error scanning row")
+	}
+
+	proxy.User = user.String
+	proxy.Pass = pass.String
+
+	return &proxy, nil
+}
+
+// Usage lists the indexers, irc networks and feeds that dial through the proxy. Rows with the
+// toggle off but a leftover proxy_id are left out on purpose, even though detachReferences and
+// the Postgres foreign key clear them on delete: the forms keep the id when use_proxy is turned
+// off, and such a row has nothing to warn about and nothing for subscribers to reconcile.
+func (r *ProxyRepo) Usage(ctx context.Context, id int64) (*domain.ProxyUsage, error) {
+	indexers, err := r.usageItems(ctx, r.db.squirrel.
+		Select("id", "name").
+		From("indexer").
+		Where(sq.Eq{"proxy_id": id, "use_proxy": true, "archived": false}).
+		OrderBy("name ASC"))
+	if err != nil {
+		return nil, errors.Wrap(err, "could not find indexers using proxy: %d", id)
+	}
+
+	ircNetworks, err := r.usageItems(ctx, r.db.squirrel.
+		Select("id", "name").
+		From("irc_network").
+		Where(sq.Eq{"proxy_id": id, "use_proxy": true}).
+		OrderBy("name ASC"))
+	if err != nil {
+		return nil, errors.Wrap(err, "could not find irc networks using proxy: %d", id)
+	}
+
+	feeds, err := r.usageItems(ctx, r.db.squirrel.
+		Select("f.id", "f.name").
+		From("feed f").
+		Join("indexer i ON f.indexer_id = i.id").
+		Where(sq.Eq{"i.proxy_id": id, "i.use_proxy": true, "i.archived": false}).
+		OrderBy("f.name ASC"))
+	if err != nil {
+		return nil, errors.Wrap(err, "could not find feeds using proxy: %d", id)
+	}
+
+	return &domain.ProxyUsage{
+		Indexers:    indexers,
+		IrcNetworks: ircNetworks,
+		Feeds:       feeds,
+	}, nil
+}
+
+func (r *ProxyRepo) usageItems(ctx context.Context, queryBuilder sq.SelectBuilder) ([]domain.ProxyUsageItem, error) {
+	query, args, err := queryBuilder.ToSql()
+	if err != nil {
+		return nil, errors.Wrap(err, "error building query")
+	}
+
+	rows, err := r.db.Handler.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, errors.Wrap(err, "error executing query")
+	}
+
+	defer rows.Close()
+
+	items := make([]domain.ProxyUsageItem, 0)
+	for rows.Next() {
+		var item domain.ProxyUsageItem
+
+		if err := rows.Scan(&item.ID, &item.Name); err != nil {
+			return nil, errors.Wrap(err, "error scanning row")
+		}
+
+		items = append(items, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, errors.Wrap(err, "row error")
+	}
+
+	return items, nil
+}
+
+func (r *ProxyRepo) ToggleEnabled(ctx context.Context, id int64, enabled bool) error {
+	queryBuilder := r.db.squirrel.
+		Update("proxy").
+		Set("enabled", enabled).
+		Set("updated_at", time.Now().Format(time.RFC3339)).
+		Where(sq.Eq{"id": id})
+
+	query, args, err := queryBuilder.ToSql()
+	if err != nil {
+		return errors.Wrap(err, "error building query")
+	}
+
+	// update record
+	res, err := r.db.Handler.ExecContext(ctx, query, args...)
+	if err != nil {
+		return errors.Wrap(err, "error executing query")
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "error getting affected rows")
+	}
+
+	if rowsAffected == 0 {
+		return domain.ErrUpdateFailed
+	}
+
+	return nil
+}

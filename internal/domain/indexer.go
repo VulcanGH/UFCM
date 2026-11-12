@@ -1,0 +1,906 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package domain
+
+import (
+	"bytes"
+	"cmp"
+	"encoding/json"
+	"maps"
+	"net/url"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"text/template"
+	"time"
+
+	"github.com/autobrr/autobrr/pkg/errors"
+	"github.com/autobrr/go-cache/regexcache"
+
+	"github.com/Masterminds/sprig/v3"
+	"github.com/dustin/go-humanize"
+)
+
+type Indexer struct {
+	ID                 int64                 `json:"id"`
+	Name               string                `json:"name"`
+	Identifier         string                `json:"identifier"`
+	IdentifierExternal string                `json:"identifier_external"`
+	Enabled            bool                  `json:"enabled"`
+	Implementation     IndexerImplementation `json:"implementation"`
+	BaseURL            string                `json:"base_url,omitempty"`
+	UseProxy           bool                  `json:"use_proxy"`
+	Proxy              *Proxy                `json:"proxy"`
+	ProxyID            int64                 `json:"proxy_id"`
+	Settings           map[string]string     `json:"settings,omitempty"`
+	Archived           bool                  `json:"archived"`
+	ArchivedAt         *time.Time            `json:"archived_at,omitempty"`
+}
+
+// secretSettingKeys are indexer settings redacted in API responses; updates must echo them
+// back, redacted or not, so a saved credential is never silently dropped.
+var secretSettingKeys = map[string]struct{}{
+	"rsskey":       {},
+	"rss_key":      {},
+	"passkey":      {},
+	"authkey":      {},
+	"torrentpass":  {},
+	"torrent_pass": {},
+	"api_key":      {},
+	"apikey":       {},
+	"uid":          {},
+	"userid":       {},
+	"key":          {},
+	"token":        {},
+	"cookie":       {},
+}
+
+// IsSecretIndexerSetting reports whether an indexer setting key holds a credential.
+func IsSecretIndexerSetting(key string) bool {
+	_, ok := secretSettingKeys[strings.ToLower(key)]
+	return ok
+}
+
+func (i Indexer) MarshalJSON() ([]byte, error) {
+	// Create a copy of the settings map with redacted secrets
+	redactedSettings := make(map[string]string)
+	for key, value := range i.Settings {
+		if IsSecretIndexerSetting(key) {
+			redactedSettings[key] = RedactString(value)
+		} else {
+			redactedSettings[key] = value
+		}
+	}
+
+	// Create alias type to avoid infinite recursion
+	type Alias Indexer
+	return json.Marshal(&struct {
+		*Alias
+		Settings map[string]string `json:"settings,omitempty"`
+	}{
+		Settings: redactedSettings,
+		Alias:    (*Alias)(&i),
+	})
+}
+
+func (i Indexer) ImplementationIsFeed() bool {
+	return i.Implementation == IndexerImplementationRSS || i.Implementation == IndexerImplementationTorznab || i.Implementation == IndexerImplementationNewznab
+}
+
+type IndexerMinimal struct {
+	ID                 int    `json:"id"`
+	Name               string `json:"name"`
+	Identifier         string `json:"identifier"`
+	IdentifierExternal string `json:"identifier_external"`
+}
+
+func (m IndexerMinimal) GetExternalIdentifier() string {
+	if m.IdentifierExternal != "" {
+		return m.IdentifierExternal
+	}
+
+	return m.Identifier
+}
+
+// IndexerDeprecation describes an indexer whose definition has been removed.
+type IndexerDeprecation struct {
+	Identifier   string    `json:"identifier" yaml:"identifier"`
+	Name         string    `json:"name" yaml:"name"`
+	Reason       string    `json:"reason" yaml:"reason"`
+	IssueURL     string    `json:"issue_url" yaml:"issue_url"`
+	AliasOf      string    `json:"alias_of,omitempty" yaml:"alias_of,omitempty"`
+	DeprecatedAt time.Time `json:"deprecated_at" yaml:"deprecated_at"`
+	FilterCount  int       `json:"filter_count" yaml:"-"`
+}
+
+type IndexerDefinition struct {
+	Version            int                   `json:"-"`
+	ID                 int                   `json:"id,omitempty"`
+	Name               string                `json:"name"`
+	Identifier         string                `json:"identifier"`
+	IdentifierExternal string                `json:"identifier_external"`
+	Implementation     IndexerImplementation `json:"implementation"`
+	BaseURL            string                `json:"base_url,omitempty"`
+	Enabled            bool                  `json:"enabled"`
+	Description        string                `json:"description"`
+	Language           string                `json:"language"`
+	Privacy            string                `json:"privacy"`
+	Protocol           string                `json:"protocol"`
+	URLS               []string              `json:"urls"`
+	Supports           []string              `json:"supports"`
+	UseProxy           bool                  `json:"use_proxy"`
+	ProxyID            int64                 `json:"proxy_id"`
+	Settings           []IndexerSetting      `json:"settings,omitempty"`
+	SettingsMap        map[string]string     `json:"-"`
+	IRC                *IndexerIRCV2         `json:"irc,omitempty"`
+	Matrix             *IndexerMatrix        `json:"matrix,omitempty"`
+	Feed               *FeedSettings         `json:"feed,omitempty"`
+}
+
+func (i *IndexerDefinition) Prepare() {
+	if i.Implementation == IndexerImplementationLegacy {
+		i.Implementation = IndexerImplementationIRC
+	}
+
+	if i.IRC != nil {
+		i.IRC.ChannelsMap = map[string]*IndexerIRCV2Channel{}
+
+		for _, channel := range i.IRC.Channels {
+			ch := &IndexerIRCV2Channel{
+				Name:       channel.Name,
+				Announcers: channel.Announcers,
+				Parse:      channel.Parse,
+			}
+
+			ch.Parse.parser = announceParserFor(i.Identifier)
+
+			// key by lowercase channel name: the IRC and announce layers
+			// canonicalize channel names to lowercase, so lookups use lowercase.
+			i.IRC.ChannelsMap[strings.ToLower(channel.Name)] = ch
+		}
+	}
+
+	if i.Matrix != nil {
+		if homeserver, err := NormalizeMatrixHomeserver(i.Matrix.Homeserver); err == nil {
+			i.Matrix.Homeserver = homeserver
+		}
+
+		i.Matrix.RoomsMap = map[string]*IndexerIRCV2Channel{}
+
+		for _, room := range i.Matrix.Rooms {
+			r := &IndexerIRCV2Channel{
+				Name:       room.Name,
+				Announcers: room.Announcers,
+				Parse:      room.Parse,
+			}
+
+			if r.Parse != nil {
+				r.Parse.parser = announceParserFor(i.Identifier)
+			}
+
+			i.Matrix.RoomsMap[strings.ToLower(room.Name)] = r
+		}
+	}
+}
+
+func announceParserFor(identifier string) IRCParser {
+	switch identifier {
+	case "ggn":
+		return IRCParserGazelleGames{}
+	case "ops":
+		return IRCParserOrpheus{}
+	case "redacted":
+		return IRCParserRedacted{}
+	default:
+		return DefaultIRCParser
+	}
+}
+
+type IndexerImplementation string
+
+const (
+	IndexerImplementationIRC     IndexerImplementation = "irc"
+	IndexerImplementationMatrix  IndexerImplementation = "matrix"
+	IndexerImplementationTorznab IndexerImplementation = "torznab"
+	IndexerImplementationNewznab IndexerImplementation = "newznab"
+	IndexerImplementationRSS     IndexerImplementation = "rss"
+	IndexerImplementationLegacy  IndexerImplementation = ""
+)
+
+func (i IndexerImplementation) String() string {
+	switch i {
+	case IndexerImplementationIRC:
+		return "irc"
+	case IndexerImplementationMatrix:
+		return "matrix"
+	case IndexerImplementationTorznab:
+		return "torznab"
+	case IndexerImplementationNewznab:
+		return "newznab"
+	case IndexerImplementationRSS:
+		return "rss"
+	case IndexerImplementationLegacy:
+		return ""
+	}
+
+	return ""
+}
+
+func (i IndexerDefinition) HasApi() bool {
+	return slices.Contains(i.Supports, "api")
+}
+
+// ValidateIRC rejects invalid IRC authentication and parse metadata in an indexer definition.
+func (i IndexerDefinition) ValidateIRC() error {
+	if i.IRC == nil {
+		return nil
+	}
+
+	if i.IRC.Auth != nil {
+		if err := i.IRC.Auth.Validate(); err != nil {
+			return err
+		}
+	}
+
+	for _, channel := range i.IRC.Channels {
+		if channel.Parse == nil {
+			continue
+		}
+
+		if err := channel.Parse.SizeUnits.Validate(); err != nil {
+			return errors.Wrap(err, "invalid parse for channel: %s", channel.Name)
+		}
+	}
+
+	return nil
+}
+
+// ValidateMatrix rejects incomplete Matrix rooms and invalid parse metadata in an indexer definition.
+func (i IndexerDefinition) ValidateMatrix() error {
+	if i.Matrix == nil {
+		return nil
+	}
+
+	if _, err := NormalizeMatrixHomeserver(i.Matrix.Homeserver); err != nil {
+		return err
+	}
+
+	if len(i.Matrix.Rooms) == 0 {
+		return errors.New("matrix definition has no rooms")
+	}
+
+	for _, room := range i.Matrix.Rooms {
+		if !IsMatrixRoomName(room.Name) {
+			return errors.New("invalid matrix room: '%s'", room.Name)
+		}
+
+		// any user can post in a public room, so announces are only trusted from listed senders
+		if len(room.Announcers) == 0 {
+			return errors.New("matrix room has no announcers: %s", room.Name)
+		}
+
+		// a parse without lines makes the announce consumer spin without reading its queue
+		if room.Parse == nil || len(room.Parse.Lines) == 0 {
+			return errors.New("matrix room has no parse lines: %s", room.Name)
+		}
+
+		if err := room.Parse.SizeUnits.Validate(); err != nil {
+			return errors.Wrap(err, "invalid parse for room: %s", room.Name)
+		}
+	}
+
+	return nil
+}
+
+type IndexerDefinitionCustom struct {
+	ID             int                   `json:"id,omitempty"`
+	Name           string                `json:"name"`
+	Identifier     string                `json:"identifier"`
+	Implementation IndexerImplementation `json:"implementation"`
+	BaseURL        string                `json:"base_url,omitempty"`
+	Enabled        bool                  `json:"enabled,omitempty"`
+	Description    string                `json:"description"`
+	Language       string                `json:"language"`
+	Privacy        string                `json:"privacy"`
+	Protocol       string                `json:"protocol"`
+	URLS           []string              `json:"urls"`
+	Supports       []string              `json:"supports"`
+	Settings       []IndexerSetting      `json:"settings,omitempty"`
+	SettingsMap    map[string]string     `json:"-"`
+	IRC            *IndexerIRC           `json:"irc,omitempty"`
+	Feed           *FeedSettings         `json:"feed,omitempty"`
+	Parse          *IndexerIRCParse      `json:"parse,omitempty"`
+}
+
+func (i *IndexerDefinitionCustom) ToIndexerDefinition() *IndexerDefinition {
+	if i.Implementation == IndexerImplementationLegacy {
+		i.Implementation = IndexerImplementationIRC
+	}
+
+	d := &IndexerDefinition{
+		ID:             i.ID,
+		Name:           i.Name,
+		Identifier:     i.Identifier,
+		Implementation: i.Implementation,
+		BaseURL:        i.BaseURL,
+		Enabled:        i.Enabled,
+		Description:    i.Description,
+		Language:       i.Language,
+		Privacy:        i.Privacy,
+		Protocol:       i.Protocol,
+		URLS:           i.URLS,
+		Supports:       i.Supports,
+		Settings:       i.Settings,
+		SettingsMap:    i.SettingsMap,
+	}
+
+	if i.IRC != nil && i.Parse != nil {
+		i.IRC.Parse = i.Parse
+	}
+
+	if i.IRC != nil {
+		d.IRC = &IndexerIRCV2{
+			Network:     i.IRC.Network,
+			Server:      i.IRC.Server,
+			Port:        i.IRC.Port,
+			TLS:         i.IRC.TLS,
+			Auth:        i.IRC.Auth,
+			SettingsMap: i.IRC.SettingsMap,
+			Settings:    i.IRC.Settings,
+			Channels:    make([]IndexerIRCV2Channel, 0),
+			ChannelsMap: map[string]*IndexerIRCV2Channel{},
+		}
+
+		for _, channelName := range i.IRC.Channels {
+			channel := IndexerIRCV2Channel{
+				Name:       channelName,
+				Announcers: i.IRC.Announcers,
+				Parse: &IndexerIRCV2Parse{
+					Type:             i.IRC.Parse.Type,
+					ForceSizeUnit:    i.IRC.Parse.ForceSizeUnit,
+					SizeUnits:        i.IRC.Parse.SizeUnits,
+					SkipCleanMessage: false,
+					Lines:            i.IRC.Parse.Lines,
+					Match: IndexerIRCV2ParseMatch{
+						DownloadURL: i.IRC.Parse.Match.TorrentURL,
+						ReleaseName: i.IRC.Parse.Match.TorrentName,
+						MagnetURI:   i.IRC.Parse.Match.MagnetURI,
+						InfoURL:     i.IRC.Parse.Match.InfoURL,
+						Encode:      i.IRC.Parse.Match.Encode,
+					},
+					Mappings: i.IRC.Parse.Mappings,
+				},
+			}
+
+			channel.Parse.parser = announceParserFor(i.Identifier)
+
+			d.IRC.Channels = append(d.IRC.Channels, channel)
+			d.IRC.ChannelsMap[strings.ToLower(channelName)] = &channel
+		}
+	}
+
+	return d
+}
+
+type SettingsFieldType string
+
+const (
+	SettingsFieldTypeText   SettingsFieldType = "text"
+	SettingsFieldTypeSecret SettingsFieldType = "secret"
+)
+
+type IndexerSetting struct {
+	Name        string            `json:"name"`
+	Required    bool              `json:"required,omitempty"`
+	Type        SettingsFieldType `json:"type"`
+	Value       string            `json:"value,omitempty"`
+	Label       string            `json:"label"`
+	Default     string            `json:"default,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Help        string            `json:"help,omitempty"`
+	Regex       string            `json:"regex,omitempty"`
+}
+
+func (is IndexerSetting) MarshalJSON() ([]byte, error) {
+	type Alias IndexerSetting
+
+	redactedValue := is.Value
+	if strings.ToLower(string(is.Type)) == "secret" {
+		redactedValue = RedactString(is.Value)
+	}
+
+	return json.Marshal(&struct {
+		*Alias
+		Value string `json:"value,omitempty"`
+	}{
+		Value: redactedValue,
+		Alias: (*Alias)(&is),
+	})
+}
+
+// FeedSettings shared Feed settings for Torznab, Newznab and RSS
+type FeedSettings struct {
+	MinInterval int              `json:"minInterval"`
+	Settings    []IndexerSetting `json:"settings"`
+}
+
+/*
+Indexer definition v1 / custom / legacy
+*/
+
+type IndexerIRCParse struct {
+	Type          string                `json:"type"`
+	ForceSizeUnit string                `json:"forcesizeunit"`
+	SizeUnits     SizeUnits             `json:"sizeunits"`
+	Lines         []IndexerIRCParseLine `json:"lines"`
+	Match         IndexerIRCParseMatch  `json:"match"`
+	Mappings      IRCMappings           `json:"mappings"`
+}
+
+type IndexerIRCParseMatch struct {
+	TorrentURL  string   `json:"torrenturl"`
+	TorrentName string   `json:"torrentname"`
+	MagnetURI   string   `json:"magneturi"`
+	InfoURL     string   `json:"infourl"`
+	Encode      []string `json:"encode"`
+}
+
+type IndexerIRC struct {
+	Network     string            `json:"network"`
+	Server      string            `json:"server"`
+	Port        int               `json:"port"`
+	TLS         bool              `json:"tls"`
+	Auth        *IndexerIRCAuth   `json:"auth,omitempty"`
+	Channels    []string          `json:"channels"`
+	Announcers  []string          `json:"announcers"`
+	SettingsMap map[string]string `json:"-"`
+	Settings    []IndexerSetting  `json:"settings"`
+	Parse       *IndexerIRCParse  `json:"parse,omitempty"`
+}
+
+// IndexerIRCAuth declares the authentication mechanism used by an IRC network.
+type IndexerIRCAuth struct {
+	Mechanism IRCAuthMechanism `json:"mechanism"`
+}
+
+// Validate rejects undeclared and unknown authentication mechanisms.
+func (a IndexerIRCAuth) Validate() error {
+	if !a.Mechanism.IsValid() {
+		return errors.New("invalid IRC authentication mechanism: %q", a.Mechanism)
+	}
+
+	return nil
+}
+
+type IRCMappings map[string]map[string]map[string]string
+
+type IndexerIRCV2 struct {
+	Network     string                          `json:"network"`
+	Server      string                          `json:"server"`
+	Port        int                             `json:"port"`
+	TLS         bool                            `json:"tls"`
+	Auth        *IndexerIRCAuth                 `json:"auth,omitempty"`
+	SettingsMap map[string]string               `json:"-"`
+	Settings    []IndexerSetting                `json:"settings"`
+	Channels    []IndexerIRCV2Channel           `json:"channels"`
+	ChannelsMap map[string]*IndexerIRCV2Channel `json:"-"`
+}
+
+// GetChannel returns the channel config for the given name. The lookup is
+// case-insensitive: channel names are canonicalized to lowercase everywhere at
+// runtime, so callers may pass any casing.
+func (irc *IndexerIRCV2) GetChannel(name string) (*IndexerIRCV2Channel, bool) {
+	channel, ok := irc.ChannelsMap[strings.ToLower(name)]
+	return channel, ok
+}
+
+// IndexerMatrix is the Matrix announce source of an indexer definition. Rooms reuse
+// the IRC channel announce and parse configuration.
+type IndexerMatrix struct {
+	Network    string                          `json:"network"`
+	Homeserver string                          `json:"homeserver"`
+	Rooms      []IndexerIRCV2Channel           `json:"rooms"`
+	RoomsMap   map[string]*IndexerIRCV2Channel `json:"-"`
+}
+
+// GetRoom returns the room config for an alias or room id, ignoring case.
+func (m *IndexerMatrix) GetRoom(name string) (*IndexerIRCV2Channel, bool) {
+	room, ok := m.RoomsMap[strings.ToLower(name)]
+	return room, ok
+}
+
+type IndexerIRCV2Channel struct {
+	Name       string             `json:"name"`
+	Announcers []string           `json:"announcers"`
+	Parse      *IndexerIRCV2Parse `json:"parse,omitempty"`
+}
+
+type IndexerIRCV2Parse struct {
+	Type             string                 `json:"type"`
+	ForceSizeUnit    string                 `json:"forcesizeunit"`
+	SizeUnits        SizeUnits              `json:"sizeunits"`
+	SkipCleanMessage bool                   `json:"skipcleanmessage"`
+	Lines            []IndexerIRCParseLine  `json:"lines"`
+	Match            IndexerIRCV2ParseMatch `json:"match"`
+	Mappings         IRCMappings            `json:"mappings"`
+
+	parser IRCParser
+}
+
+// SizeUnits declares which multiplier an indexer means by its size unit labels.
+type SizeUnits string
+
+const (
+	// SizeUnitsBinary is for indexers that format sizes with base 1024 but label them KB, MB, GB.
+	SizeUnitsBinary SizeUnits = "binary"
+)
+
+func (s SizeUnits) String() string {
+	return string(s)
+}
+
+// Validate rejects size units other than the decimal default and binary.
+func (s SizeUnits) Validate() error {
+	switch s {
+	case "", SizeUnitsBinary:
+		return nil
+	}
+
+	return errors.New("invalid size units: %q", s)
+}
+
+type IndexerIRCV2ParseMatch struct {
+	DownloadURL string   `json:"downloadurl"`
+	ReleaseName string   `json:"releaseName"`
+	MagnetURI   string   `json:"magnetURI"`
+	InfoURL     string   `json:"infoURL"`
+	Encode      []string `json:"encode"`
+}
+
+type LineTest struct {
+	Line   string            `json:"line"`
+	Expect map[string]string `json:"expect"`
+}
+
+type IndexerIRCParseLine struct {
+	Pattern string     `json:"pattern"`
+	Vars    []string   `json:"vars"`
+	Ignore  bool       `json:"ignore"`
+	Tests   []LineTest `json:"tests"`
+}
+
+func (l IndexerIRCParseLine) ParseLine(tmpVars map[string]string, line string, ignore bool) (bool, error) {
+	// an explicit vars list takes precedence and keeps the legacy positional mapping
+	if len(l.Vars) > 0 {
+		return parseLineExtract(l.Pattern, l.Vars, tmpVars, line)
+	}
+
+	// otherwise, if the pattern defines named capture groups, map those directly.
+	// this mirrors parseLineExtract's single-match, case-sensitive semantics.
+	if rxp, err := regexcache.Compile(l.Pattern); err == nil && hasNamedGroups(rxp) {
+		return parseLineExtractNamed(rxp, tmpVars, line)
+	}
+
+	return parseLineMatchRegexp(l.Pattern, tmpVars, line, ignore)
+}
+
+// hasNamedGroups reports whether the compiled pattern defines any named capture groups.
+func hasNamedGroups(rxp *regexp.Regexp) bool {
+	for _, name := range rxp.SubexpNames() {
+		if name != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// parseLineExtractNamed maps named capture groups to their values. Unnamed groups are
+// skipped, so a pattern can capture without binding a variable.
+func parseLineExtractNamed(rxp *regexp.Regexp, tmpVars map[string]string, line string) (bool, error) {
+	matches := rxp.FindStringSubmatch(line)
+	if matches == nil {
+		return false, nil
+	}
+
+	for i, name := range rxp.SubexpNames() {
+		if i == 0 || name == "" {
+			continue
+		}
+
+		tmpVars[name] = matches[i]
+	}
+
+	return true, nil
+}
+
+func parseLineregExMatch(pattern string, value string) ([]string, error) {
+	rxp, err := regexcache.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	matches := rxp.FindStringSubmatch(value)
+	if matches == nil {
+		return nil, nil
+	}
+
+	return matches[1:], nil
+}
+
+//func ParseLine(pattern string, vars []string, tmpVars map[string]string, line string, ignore bool) (bool, error) {
+//	if len(vars) > 0 {
+//		return parseExtract(pattern, vars, tmpVars, line)
+//	}
+//
+//	return parseMatchRegexp(pattern, tmpVars, line, ignore)
+//}
+
+func parseLineExtract(pattern string, vars []string, tmpVars map[string]string, line string) (bool, error) {
+	rxp, err := parseLineregExMatch(pattern, line)
+	if err != nil {
+		return false, errors.Wrap(ErrUnexpectedLine, "could not match line: %s", line)
+	}
+
+	if rxp == nil {
+		return false, nil
+	}
+
+	for i, v := range vars {
+		if i+1 > len(rxp) {
+			return false, errors.New("too few matches returned for rxp")
+		}
+
+		tmpVars[v] = rxp[i]
+	}
+	return true, nil
+}
+
+func parseLineMatchRegexp(pattern string, tmpVars map[string]string, line string, ignore bool) (bool, error) {
+	var re = regexcache.MustCompile(`(?mi)` + pattern)
+
+	groupNames := re.SubexpNames()
+	for _, match := range re.FindAllStringSubmatch(line, -1) {
+		for groupIdx, group := range match {
+			// if line should be ignored then lets return
+			if ignore {
+				return true, nil
+			}
+
+			name := cmp.Or(groupNames[groupIdx], "raw")
+			tmpVars[name] = group
+		}
+	}
+
+	return true, nil
+}
+
+// sprigFuncs is built once. sprig.TxtFuncMap assembles a map of well over a
+// hundred entries on every call, and these templates are rendered for every
+// announce.
+var sprigFuncs = sprig.TxtFuncMap()
+
+// templates caches the parsed announce templates. Their text comes from the
+// indexer definitions, so the set is bounded by what is loaded at startup, and
+// a parsed template is safe to execute from several announce processors at once.
+var templates sync.Map
+
+func cachedTemplate(name, text string) (*template.Template, error) {
+	key := name + "\x00" + text
+
+	if cached, ok := templates.Load(key); ok {
+		return cached.(*template.Template), nil
+	}
+
+	tmpl, err := template.New(name).Funcs(sprigFuncs).Parse(text)
+	if err != nil {
+		return nil, errors.New("could not create %s template", name)
+	}
+
+	templates.Store(key, tmpl)
+
+	return tmpl, nil
+}
+
+func parseTemplateURL(baseURL, sourceURL string, vars map[string]string, basename string) (*url.URL, error) {
+	tmpl, err := cachedTemplate(basename, sourceURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var urlBytes bytes.Buffer
+	if err := tmpl.Execute(&urlBytes, &vars); err != nil {
+		return nil, errors.New("could not write %s url template output", basename)
+	}
+
+	templateUrl := urlBytes.String()
+	parsedUrl, err := url.Parse(templateUrl)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not parse template url: %q", templateUrl)
+	}
+
+	// for backwards compatibility remove Host and Scheme to rebuild url
+	if parsedUrl.Host != "" {
+		parsedUrl.Host = ""
+	}
+	if parsedUrl.Scheme != "" {
+		parsedUrl.Scheme = ""
+	}
+
+	// join baseURL with query
+	baseUrlPath, err := url.JoinPath(baseURL, parsedUrl.Path)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not join %s url", basename)
+	}
+
+	// reconstruct url
+	infoUrl, err := url.Parse(baseUrlPath)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not parse %s url", basename)
+	}
+
+	infoUrl.RawQuery = parsedUrl.RawQuery
+
+	return infoUrl, nil
+}
+
+/*
+  indexer definition v2
+*/
+
+func (p *IndexerIRCV2ParseMatch) ParseURLs(baseURL string, vars map[string]string, rls *Release) error {
+	// handle url encode of values
+	for _, e := range p.Encode {
+		if v, ok := vars[e]; ok {
+			// url encode  value
+			t := url.QueryEscape(v)
+			vars[e] = t
+		}
+	}
+
+	if p.InfoURL != "" {
+		infoURL, err := parseTemplateURL(baseURL, p.InfoURL, vars, "infourl")
+		if err != nil {
+			return err
+		}
+
+		rls.InfoURL = infoURL.String()
+	}
+
+	if p.DownloadURL != "" {
+		downloadURL, err := parseTemplateURL(baseURL, p.DownloadURL, vars, "downloadurl")
+		if err != nil {
+			return err
+		}
+
+		rls.DownloadURL = downloadURL.String()
+	}
+
+	if p.MagnetURI != "" {
+		magnetURI, err := parseTemplateURL("magnet:", p.MagnetURI, vars, "magneturi")
+		if err != nil {
+			return err
+		}
+
+		rls.MagnetURI = magnetURI.String()
+	}
+
+	return nil
+}
+
+func (p *IndexerIRCV2ParseMatch) ParseReleaseName(vars map[string]string, rls *Release) error {
+	if p.ReleaseName != "" {
+		tmplName, err := cachedTemplate("releasename", p.ReleaseName)
+		if err != nil {
+			return err
+		}
+
+		var nameBytes bytes.Buffer
+		if err := tmplName.Execute(&nameBytes, &vars); err != nil {
+			return errors.New("could not write torrent name template output")
+		}
+
+		rls.TorrentName = nameBytes.String()
+	}
+
+	return nil
+}
+
+func (p *IndexerIRCV2Parse) MapCustomVariables(vars map[string]string) error {
+	for varsKey, varsKeyMap := range p.Mappings {
+		varsValue, ok := vars[varsKey]
+		if !ok {
+			continue
+		}
+
+		keyValueMap, ok := varsKeyMap[varsValue]
+		if !ok {
+			continue
+		}
+
+		maps.Copy(vars, keyValueMap)
+	}
+
+	return nil
+}
+
+// Parse maps the variables captured from an announce onto the release.
+func (p *IndexerIRCV2Parse) Parse(def *IndexerDefinition, vars map[string]string, rls *Release) error {
+	if err := p.MapCustomVariables(vars); err != nil {
+		return errors.Wrap(err, "could not map custom variables for release")
+	}
+
+	if err := rls.MapVars(vars, p.ForceSizeUnit, p.SizeUnits); err != nil {
+		return errors.Wrap(err, "could not map variables for release")
+	}
+
+	// merge vars from regex captures on announce and vars from settings
+	mergedVars := mergeVars(vars, def.SettingsMap)
+
+	baseUrl := def.BaseURL
+	if baseUrl == "" {
+		if len(def.URLS) == 0 {
+			return errors.New("could not find a valid indexer baseUrl")
+		}
+
+		baseUrl = def.URLS[0]
+	}
+
+	// parse urls
+	if err := p.Match.ParseURLs(baseUrl, mergedVars, rls); err != nil {
+		return errors.Wrap(err, "could not parse urls for release")
+	}
+
+	// optionally parse release name template
+	if err := p.Match.ParseReleaseName(mergedVars, rls); err != nil {
+		return errors.Wrap(err, "could not parse release name")
+	}
+
+	if err := p.parser.Parse(rls, vars); err != nil {
+		return errors.Wrap(err, "could not parse release")
+	}
+
+	if v, ok := def.SettingsMap["cookie"]; ok {
+		rls.RawCookie = v
+	}
+
+	return nil
+}
+
+type TorrentBasic struct {
+	Id          string `json:"Id"`
+	TorrentId   string `json:"TorrentId,omitempty"`
+	InfoHash    string `json:"InfoHash"`
+	Size        string `json:"Size"`
+	Uploader    string `json:"Uploader"`
+	RecordLabel string `json:"RecordLabel"`
+}
+
+func (t TorrentBasic) ReleaseSizeBytes() uint64 {
+	if t.Size == "" {
+		return 0
+	}
+
+	releaseSizeBytes, err := humanize.ParseBytes(t.Size)
+	if err != nil {
+		// log could not parse into bytes
+		return 0
+	}
+	return releaseSizeBytes
+}
+
+type IndexerTestApiRequest struct {
+	IndexerId  int    `json:"id,omitempty"`
+	Identifier string `json:"identifier,omitempty"`
+	ApiUser    string `json:"api_user,omitempty"`
+	ApiKey     string `json:"api_key"`
+	ProxyID    int64  `json:"proxy_id,omitempty"`
+	UseProxy   bool   `json:"use_proxy"`
+}
+
+type GetIndexerRequest struct {
+	ID         int
+	Identifier string
+	Name       string
+}

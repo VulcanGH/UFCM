@@ -1,0 +1,330 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package domain
+
+import (
+	"encoding/json"
+	"strconv"
+	"time"
+
+	"github.com/autobrr/autobrr/pkg/errors"
+	"github.com/autobrr/autobrr/pkg/newznab"
+	"github.com/autobrr/autobrr/pkg/torznab"
+
+	"golang.org/x/net/http/httpguts"
+)
+
+type Feed struct {
+	ID            int               `json:"id"`
+	Name          string            `json:"name"`
+	Indexer       IndexerMinimal    `json:"indexer"`
+	Type          string            `json:"type"`
+	Enabled       bool              `json:"enabled"`
+	URL           string            `json:"url"`
+	Interval      int               `json:"interval"`
+	Timeout       int               `json:"timeout"` // seconds
+	MaxAge        int               `json:"max_age"` // seconds
+	Categories    []int             `json:"categories"`
+	Capabilities  *FeedCapabilities `json:"capabilities"`
+	ApiKey        string            `json:"api_key"`
+	Cookie        string            `json:"cookie"`
+	UserAgent     string            `json:"user_agent"`
+	TLSSkipVerify bool              `json:"tls_skip_verify"`
+	Settings      *FeedSettingsJSON `json:"settings"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
+	IndexerID     int               `json:"indexer_id,omitempty"`
+	LastRun       time.Time         `json:"last_run"`
+	LastRunData   string            `json:"last_run_data"`
+	NextRun       time.Time         `json:"next_run"`
+
+	// belongs to Indexer
+	IndexerEnabled bool   `json:"-"`
+	ProxyID        int64  `json:"-"`
+	UseProxy       bool   `json:"-"`
+	Proxy          *Proxy `json:"-"`
+}
+
+// Validate rejects field values that would make every feed request fail at the transport layer.
+func (f Feed) Validate() error {
+	if !httpguts.ValidHeaderFieldValue(f.UserAgent) {
+		return errors.New("user agent must not contain control characters")
+	}
+
+	if f.Settings != nil {
+		switch f.Settings.ProcessOrder {
+		case "", FeedProcessOrderOldestFirst, FeedProcessOrderNewestFirst:
+		default:
+			return errors.New("invalid process order: %s", f.Settings.ProcessOrder)
+		}
+	}
+
+	return nil
+}
+
+func (f Feed) MarshalJSON() ([]byte, error) {
+	type Alias Feed
+	return json.Marshal(&struct {
+		*Alias
+		APIKey string `json:"api_key"`
+		Cookie string `json:"cookie"`
+	}{
+		APIKey: RedactString(f.ApiKey),
+		Cookie: RedactString(f.Cookie),
+		Alias:  (*Alias)(&f),
+	})
+}
+
+type FeedSettingsJSON struct {
+	DownloadType FeedDownloadType `json:"download_type"`
+	CacheTTLDays int              `json:"cache_ttl_days"`
+	MaxPages     int              `json:"max_pages"`
+	ProcessOrder FeedProcessOrder `json:"process_order"`
+}
+
+// DefaultFeedCacheTTLDays is the feed cache item TTL used when a feed has no explicit cache TTL configured.
+const DefaultFeedCacheTTLDays = 31
+
+// DefaultFeedPages is the max pages fetched per feed run when none is configured.
+const DefaultFeedPages = 1
+
+// MaxFeedPages caps the per-feed max pages setting.
+const MaxFeedPages = 10
+
+// CacheTTLDays returns the number of days feed cache items are kept.
+func (f Feed) CacheTTLDays() int {
+	if f.Settings != nil && f.Settings.CacheTTLDays > 0 {
+		return f.Settings.CacheTTLDays
+	}
+
+	return DefaultFeedCacheTTLDays
+}
+
+// CacheTTL returns the expiry time for new feed cache items.
+func (f Feed) CacheTTL() time.Time {
+	return time.Now().AddDate(0, 0, f.CacheTTLDays())
+}
+
+// CacheCoversLastRun reports whether items cached by the last run are still unexpired at now.
+func (f Feed) CacheCoversLastRun(now time.Time) bool {
+	return !f.LastRun.IsZero() && f.LastRun.After(now.AddDate(0, 0, -f.CacheTTLDays()))
+}
+
+// PaginationMaxPages returns the max pages fetched per feed run, clamped to MaxFeedPages.
+func (f Feed) PaginationMaxPages() int {
+	if f.Settings != nil && f.Settings.MaxPages > 0 {
+		return min(f.Settings.MaxPages, MaxFeedPages)
+	}
+
+	return DefaultFeedPages
+}
+
+// ProcessNewestFirst reports whether new items are sent to filters newest first instead of oldest first.
+func (f Feed) ProcessNewestFirst() bool {
+	return f.Settings != nil && f.Settings.ProcessOrder == FeedProcessOrderNewestFirst
+}
+
+type FeedIndexer struct {
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	Identifier string `json:"identifier"`
+}
+
+type FeedType string
+
+const (
+	FeedTypeTorznab FeedType = "TORZNAB"
+	FeedTypeNewznab FeedType = "NEWZNAB"
+	FeedTypeRSS     FeedType = "RSS"
+)
+
+type FeedDownloadType string
+
+const (
+	FeedDownloadTypeMagnet  FeedDownloadType = "MAGNET"
+	FeedDownloadTypeTorrent FeedDownloadType = "TORRENT"
+	FeedDownloadTypeNzb     FeedDownloadType = "NZB"
+)
+
+// FeedProcessOrder is the order new feed items are sent to filters in; empty means oldest first.
+type FeedProcessOrder string
+
+const (
+	FeedProcessOrderOldestFirst FeedProcessOrder = "OLDEST_FIRST"
+	FeedProcessOrderNewestFirst FeedProcessOrder = "NEWEST_FIRST"
+)
+
+type FeedCacheItem struct {
+	FeedId string    `json:"feed_id"`
+	Key    string    `json:"key"`
+	Value  []byte    `json:"value"`
+	TTL    time.Time `json:"ttl"`
+}
+
+type FindOneParams struct {
+	FeedID            int
+	IndexerID         int
+	IndexerIdentifier string
+}
+
+type FeedCapsServer struct {
+	Version   string `json:"version"`
+	Title     string `json:"title"`
+	Strapline string `json:"strapline"`
+	Email     string `json:"email"`
+	URL       string `json:"url"`
+	Image     string `json:"image"`
+}
+
+type FeedCapabilitiesLimits struct {
+	Max     int `json:"max"`
+	Default int `json:"default"`
+}
+
+type FeedCapabilitiesSearching struct {
+	Search      FeedCapsSearch `json:"search"`
+	TvSearch    FeedCapsSearch `json:"tv-search"`
+	MovieSearch FeedCapsSearch `json:"movie-search"`
+	AudioSearch FeedCapsSearch `json:"audio-search"`
+	BookSearch  FeedCapsSearch `json:"book-search"`
+}
+
+type FeedCapsSearch struct {
+	Available       string `json:"available"`
+	SupportedParams string `json:"supportedParams"`
+	SearchEngine    string `json:"searchEngine"`
+}
+
+type FeedCapabilitiesCategories struct {
+	Category []FeedCapabilitiesCategory `json:"category"`
+}
+
+type FeedCapabilitiesCategory struct {
+	ID            int                        `json:"id"`
+	Name          string                     `json:"name"`
+	SubCategories []FeedCapabilitiesCategory `json:"subcategories"`
+}
+
+type FeedCapabilities struct {
+	Server     FeedCapsServer             `json:"server"`
+	Limits     FeedCapabilitiesLimits     `json:"limits"`
+	Categories []FeedCapabilitiesCategory `json:"categories"`
+	Searching  FeedCapabilitiesSearching  `json:"searching"`
+}
+
+func NewFeedCapabilitiesFromTorznab(caps *torznab.Caps) *FeedCapabilities {
+	c := &FeedCapabilities{
+		Server: FeedCapsServer{
+			Version:   caps.Server.Version,
+			Title:     caps.Server.Title,
+			Strapline: caps.Server.Strapline,
+			Email:     caps.Server.Email,
+			URL:       caps.Server.URL,
+			Image:     caps.Server.Image,
+		},
+		Limits: FeedCapabilitiesLimits{
+			Max:     100,
+			Default: 50,
+		},
+		Categories: make([]FeedCapabilitiesCategory, 0),
+		Searching:  FeedCapabilitiesSearching{},
+	}
+
+	if maxVal := parseFeedCapLimitValue(caps.Limits.Max); maxVal > 0 {
+		c.Limits.Max = maxVal
+	}
+	if def := parseFeedCapLimitValue(caps.Limits.Default); def > 0 {
+		c.Limits.Default = def
+	}
+
+	for _, cat := range caps.Categories.Categories {
+		parentCat := FeedCapabilitiesCategory{
+			ID:            cat.ID,
+			Name:          cat.Name,
+			SubCategories: make([]FeedCapabilitiesCategory, 0),
+		}
+		for _, j := range cat.SubCategories {
+			parentCat.SubCategories = append(parentCat.SubCategories, FeedCapabilitiesCategory{
+				ID:   j.ID,
+				Name: j.Name,
+			})
+		}
+		c.Categories = append(c.Categories, parentCat)
+	}
+
+	c.Searching = FeedCapabilitiesSearching{
+		Search:      FeedCapsSearch{Available: caps.Searching.Search.Available, SupportedParams: caps.Searching.Search.SupportedParams},
+		TvSearch:    FeedCapsSearch{Available: caps.Searching.TvSearch.Available, SupportedParams: caps.Searching.TvSearch.SupportedParams},
+		MovieSearch: FeedCapsSearch{Available: caps.Searching.MovieSearch.Available, SupportedParams: caps.Searching.MovieSearch.SupportedParams},
+		AudioSearch: FeedCapsSearch{Available: caps.Searching.AudioSearch.Available, SupportedParams: caps.Searching.AudioSearch.SupportedParams},
+		BookSearch:  FeedCapsSearch{Available: caps.Searching.BookSearch.Available, SupportedParams: caps.Searching.BookSearch.SupportedParams},
+	}
+
+	return c
+}
+
+func NewFeedCapabilitiesFromNewznab(caps *newznab.Caps) *FeedCapabilities {
+	c := &FeedCapabilities{
+		Server: FeedCapsServer{
+			Version:   caps.Server.Version,
+			Title:     caps.Server.Title,
+			Strapline: caps.Server.Strapline,
+			Email:     caps.Server.Email,
+			URL:       caps.Server.URL,
+			Image:     caps.Server.Image,
+		},
+		Limits: FeedCapabilitiesLimits{
+			Max:     100,
+			Default: 50,
+		},
+		Categories: make([]FeedCapabilitiesCategory, 0),
+	}
+
+	if maxVal := parseFeedCapLimitValue(caps.Limits.Max); maxVal > 0 {
+		c.Limits.Max = maxVal
+	}
+	if def := parseFeedCapLimitValue(caps.Limits.Default); def > 0 {
+		c.Limits.Default = def
+	}
+
+	for _, cat := range caps.Categories.Categories {
+		parentCat := FeedCapabilitiesCategory{
+			ID:            cat.ID,
+			Name:          cat.Name,
+			SubCategories: make([]FeedCapabilitiesCategory, 0),
+		}
+		for _, j := range cat.SubCategories {
+			parentCat.SubCategories = append(parentCat.SubCategories, FeedCapabilitiesCategory{
+				ID:   j.ID,
+				Name: j.Name,
+			})
+		}
+		c.Categories = append(c.Categories, parentCat)
+	}
+
+	c.Searching = FeedCapabilitiesSearching{
+		Search:      FeedCapsSearch{Available: caps.Searching.Search.Available, SupportedParams: caps.Searching.Search.SupportedParams},
+		TvSearch:    FeedCapsSearch{Available: caps.Searching.TvSearch.Available, SupportedParams: caps.Searching.TvSearch.SupportedParams},
+		MovieSearch: FeedCapsSearch{Available: caps.Searching.MovieSearch.Available, SupportedParams: caps.Searching.MovieSearch.SupportedParams},
+		AudioSearch: FeedCapsSearch{Available: caps.Searching.AudioSearch.Available, SupportedParams: caps.Searching.AudioSearch.SupportedParams},
+		BookSearch:  FeedCapsSearch{Available: caps.Searching.BookSearch.Available, SupportedParams: caps.Searching.BookSearch.SupportedParams},
+	}
+
+	return c
+}
+
+func parseFeedCapLimitValue(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case string:
+		parsed, err := strconv.Atoi(v)
+		if err != nil {
+			return 0
+		}
+		return parsed
+	default:
+		return 0
+	}
+}

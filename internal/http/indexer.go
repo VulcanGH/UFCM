@@ -1,0 +1,297 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package http
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+
+	"github.com/autobrr/autobrr/internal/domain"
+	"github.com/autobrr/autobrr/pkg/errors"
+
+	"github.com/go-chi/chi/v5"
+)
+
+type indexerService interface {
+	Store(ctx context.Context, indexer domain.Indexer) (*domain.Indexer, error)
+	Update(ctx context.Context, indexer *domain.Indexer) error
+	List(ctx context.Context) ([]domain.Indexer, error)
+	FindByID(ctx context.Context, id int) (*domain.Indexer, error)
+	GetAll() ([]*domain.IndexerDefinition, error)
+	GetTemplates() ([]domain.IndexerDefinition, error)
+	Delete(ctx context.Context, id int) error
+	DeleteArchived(ctx context.Context, id int) error
+	TestApi(ctx context.Context, req domain.IndexerTestApiRequest) error
+	ToggleEnabled(ctx context.Context, indexerID int, enabled bool) error
+	ListDeprecations(ctx context.Context) ([]domain.IndexerDeprecation, error)
+}
+
+type indexerHandler struct {
+	encoder encoder
+	service indexerService
+	ircSvc  ircService
+}
+
+func newIndexerHandler(encoder encoder, service indexerService, ircSvc ircService) *indexerHandler {
+	return &indexerHandler{
+		encoder: encoder,
+		service: service,
+		ircSvc:  ircSvc,
+	}
+}
+
+func (h indexerHandler) Routes(r chi.Router) {
+	read := requireScope(domain.APIResourceIndexers, domain.APIAccessRead)
+	write := requireScope(domain.APIResourceIndexers, domain.APIAccessWrite)
+
+	r.With(read).Get("/schema", h.getSchema)
+	r.With(write).Post("/", h.store)
+	r.With(read).Get("/", h.getAll)
+	r.With(read).Get("/options", h.list)
+	r.With(read).Get("/deprecations", h.deprecations)
+	r.With(write).Delete("/deprecations/{indexerID}", h.deleteArchived)
+
+	r.Route("/{indexerID}", func(r chi.Router) {
+		r.With(read).Get("/", h.findByID)
+		r.With(write).Put("/", h.update)
+		r.With(write).Delete("/", h.delete)
+		r.With(write).Post("/api/test", h.testApi)
+
+		r.With(write).Patch("/enabled", h.toggleEnabled)
+	})
+}
+
+func (h indexerHandler) getSchema(w http.ResponseWriter, _ *http.Request) {
+	indexers, err := h.service.GetTemplates()
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, indexers)
+}
+
+func (h indexerHandler) store(w http.ResponseWriter, r *http.Request) {
+	var data domain.Indexer
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	indexer, err := h.service.Store(r.Context(), data)
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusCreated, indexer)
+}
+
+func (h indexerHandler) update(w http.ResponseWriter, r *http.Request) {
+	indexerID, err := parseURLParamInt(r, "indexerID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	var data *domain.Indexer
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if data == nil {
+		h.encoder.BadRequestErr(w, errors.New("indexer is required"))
+		return
+	}
+
+	data.ID = int64(indexerID)
+
+	if err := h.service.Update(r.Context(), data); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("indexer with id %d not found", indexerID))
+			return
+		}
+		if errors.Is(err, domain.ErrIndexerArchived) {
+			h.encoder.BadRequestErr(w, err)
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, data)
+}
+
+func (h indexerHandler) delete(w http.ResponseWriter, r *http.Request) {
+	indexerID, err := parseURLParamInt(r, "indexerID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	if err := h.service.Delete(r.Context(), indexerID); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("indexer with id %d not found", indexerID))
+			return
+		}
+		if errors.Is(err, domain.ErrIndexerArchived) {
+			h.encoder.BadRequestErr(w, err)
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.NoContent(w)
+}
+
+func (h indexerHandler) getAll(w http.ResponseWriter, _ *http.Request) {
+	indexers, err := h.service.GetAll()
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, indexers)
+}
+
+func (h indexerHandler) list(w http.ResponseWriter, r *http.Request) {
+	indexers, err := h.service.List(r.Context())
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, indexers)
+}
+
+func (h indexerHandler) deprecations(w http.ResponseWriter, r *http.Request) {
+	deprecations, err := h.service.ListDeprecations(r.Context())
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, deprecations)
+}
+
+func (h indexerHandler) deleteArchived(w http.ResponseWriter, r *http.Request) {
+	indexerID, err := parseURLParamInt(r, "indexerID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	if err := h.service.DeleteArchived(r.Context(), indexerID); err != nil {
+		switch {
+		case errors.Is(err, domain.ErrRecordNotFound):
+			h.encoder.NotFoundErr(w, errors.New("archived indexer with id %d not found", indexerID))
+		case errors.Is(err, domain.ErrIndexerNotArchived), errors.Is(err, domain.ErrIndexerInUse):
+			h.encoder.BadRequestErr(w, err)
+		default:
+			h.encoder.Error(w, err)
+		}
+		return
+	}
+
+	h.encoder.NoContent(w)
+}
+
+func (h indexerHandler) findByID(w http.ResponseWriter, r *http.Request) {
+	indexerID, err := parseURLParamInt(r, "indexerID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	indexer, err := h.service.FindByID(r.Context(), indexerID)
+	if err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("indexer with id %d not found", indexerID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, indexer)
+}
+
+func (h indexerHandler) testApi(w http.ResponseWriter, r *http.Request) {
+	indexerID, err := parseURLParamInt(r, "indexerID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	var req domain.IndexerTestApiRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if req.IndexerId == 0 {
+		req.IndexerId = indexerID
+	}
+
+	if err := h.service.TestApi(r.Context(), req); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("indexer with id %d not found", indexerID))
+			return
+		}
+		if errors.Is(err, domain.ErrIndexerArchived) {
+			h.encoder.BadRequestErr(w, err)
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	res := struct {
+		Message string `json:"message"`
+	}{
+		Message: "Indexer api test OK",
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, res)
+}
+
+func (h indexerHandler) toggleEnabled(w http.ResponseWriter, r *http.Request) {
+	indexerID, err := parseURLParamInt(r, "indexerID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	var data struct {
+		Enabled bool `json:"enabled"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if err := h.service.ToggleEnabled(r.Context(), indexerID, data.Enabled); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("indexer with id %d not found", indexerID))
+			return
+		}
+		if errors.Is(err, domain.ErrIndexerArchived) {
+			h.encoder.BadRequestErr(w, err)
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.NoContent(w)
+}

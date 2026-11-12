@@ -1,0 +1,154 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package http
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+
+	"github.com/autobrr/autobrr/internal/domain"
+	"github.com/autobrr/autobrr/pkg/errors"
+
+	"github.com/go-chi/chi/v5"
+)
+
+type actionService interface {
+	List(ctx context.Context) ([]domain.Action, error)
+	Store(ctx context.Context, action *domain.Action) error
+	Update(ctx context.Context, action *domain.Action) (*domain.Action, error)
+	Delete(ctx context.Context, req *domain.DeleteActionRequest) error
+	ToggleEnabled(actionID int) error
+}
+
+type actionHandler struct {
+	encoder encoder
+	service actionService
+}
+
+func newActionHandler(encoder encoder, service actionService) *actionHandler {
+	return &actionHandler{
+		encoder: encoder,
+		service: service,
+	}
+}
+
+func (h actionHandler) Routes(r chi.Router) {
+	read := requireScope(domain.APIResourceFilters, domain.APIAccessRead)
+	write := requireScope(domain.APIResourceFilters, domain.APIAccessWrite)
+
+	r.With(read).Get("/", h.getActions)
+	r.With(write).Post("/", h.storeAction)
+
+	r.Route("/{actionID}", func(r chi.Router) {
+		r.With(write).Delete("/", h.deleteAction)
+		r.With(write).Put("/", h.updateAction)
+		r.With(write).Patch("/toggleEnabled", h.toggleActionEnabled)
+	})
+}
+
+func (h actionHandler) getActions(w http.ResponseWriter, r *http.Request) {
+	actions, err := h.service.List(r.Context())
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, actions)
+}
+
+func (h actionHandler) storeAction(w http.ResponseWriter, r *http.Request) {
+	var data *domain.Action
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if data == nil {
+		h.encoder.BadRequestErr(w, errors.New("action is required"))
+		return
+	}
+
+	err := h.service.Store(r.Context(), data)
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusCreated, data)
+}
+
+func (h actionHandler) updateAction(w http.ResponseWriter, r *http.Request) {
+	actionID, err := parseURLParamInt(r, "actionID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	var data *domain.Action
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if data == nil {
+		h.encoder.BadRequestErr(w, errors.New("action is required"))
+		return
+	}
+
+	data.ID = actionID
+
+	action, err := h.service.Update(r.Context(), data)
+	if err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("action with id %d not found", actionID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, action)
+}
+
+func (h actionHandler) deleteAction(w http.ResponseWriter, r *http.Request) {
+	actionID, err := parseURLParamInt(r, "actionID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	if err := h.service.Delete(r.Context(), &domain.DeleteActionRequest{ActionId: actionID}); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("action with id %d not found", actionID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.NoContent(w)
+}
+
+func (h actionHandler) toggleActionEnabled(w http.ResponseWriter, r *http.Request) {
+	actionID, err := parseURLParamInt(r, "actionID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	if err := h.service.ToggleEnabled(actionID); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("action with id %d not found", actionID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.NoContent(w)
+}

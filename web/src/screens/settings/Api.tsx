@@ -1,0 +1,224 @@
+/*
+ * Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import { useRef } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { PencilSquareIcon, TrashIcon } from "@heroicons/react/24/outline";
+import { useTranslation } from "react-i18next";
+
+import { DeleteModal } from "@components/modals";
+import { APIKeyAddForm, APIKeyUpdateForm } from "@forms/settings/APIKeyForms";
+import { toast } from "@components/hot-toast";
+import Toast from "@components/notifications/Toast";
+import { WarningAlert } from "@components/alerts";
+import { APIClient } from "@api/APIClient";
+import { ApikeysQueryOptions } from "@api/queries";
+import { ApiKeys } from "@api/query_keys";
+import { useToggle } from "@hooks/hooks";
+import { classNames } from "@utils";
+import { AuthContext } from "@utils/Context";
+import { EmptySimple } from "@components/emptystates";
+import { Section } from "./_components";
+import { PlusIcon } from "@heroicons/react/24/solid";
+
+
+function APISettings() {
+  const { t } = useTranslation("settings");
+  const [addFormIsOpen, toggleAddForm] = useToggle(false);
+
+  // Skip the fetch in modes without key management so the (403'd) endpoint isn't
+  // hit and the notice below can render.
+  const keyManagement = AuthContext.useSelector((s) => s.capabilities?.api_key_management) ?? false;
+
+  const apikeysQuery = useQuery({ ...ApikeysQueryOptions(), enabled: keyManagement });
+
+  if (!keyManagement) {
+    return (
+      <Section
+        title={t("forms.apiKey.listTitle")}
+        description={t("forms.apiKey.listDescription")}
+      >
+        <div className="sm:px-2">
+          <WarningAlert text={t("forms.apiKey.authDisabledNotice")} />
+        </div>
+      </Section>
+    );
+  }
+
+  return (
+    <Section
+      title={t("forms.apiKey.listTitle")}
+      description={t("forms.apiKey.listDescription")}
+      rightSide={
+        <button
+          type="button"
+          className="relative inline-flex items-center px-4 py-2 border border-transparent shadow-xs text-sm font-medium rounded-md text-white bg-blue-600 dark:bg-blue-600 hover:bg-blue-700 dark:hover:bg-blue-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 cursor-pointer"
+          onClick={toggleAddForm}
+        >
+          <PlusIcon className="h-5 w-5 mr-1" />
+          {t("forms.apiKey.addNew")}
+        </button>
+      }
+    >
+      <APIKeyAddForm isOpen={addFormIsOpen} toggle={toggleAddForm} />
+
+      {apikeysQuery.data && apikeysQuery.data.length > 0 ? (
+        <ul className="min-w-full relative">
+          <li className="hidden sm:grid grid-cols-12 gap-4 mb-2 border-b border-gray-200 dark:border-gray-700">
+            <div className="col-span-4 px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              {t("forms.apiKey.name")}
+            </div>
+            <div className="col-span-7 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              {t("forms.apiKey.permissions")}
+            </div>
+          </li>
+
+          {apikeysQuery.data.map((k) => <APIListItem key={k.id} apikey={k} />)}
+        </ul>
+      ) : (
+        <EmptySimple
+          title={t("forms.apiKey.noItems")}
+          subtitle=""
+          buttonAction={toggleAddForm}
+          buttonText={t("forms.apiKey.createCta")}
+        />
+      )}
+    </Section>
+  );
+}
+
+interface ApiKeyItemProps {
+  apikey: APIKey;
+}
+
+function APIListItem({ apikey }: ApiKeyItemProps) {
+  const { t } = useTranslation("settings");
+  const cancelModalButtonRef = useRef(null);
+  const [deleteModalIsOpen, toggleDeleteModal] = useToggle(false);
+  const [updateFormIsOpen, toggleUpdateForm] = useToggle(false);
+
+  const queryClient = useQueryClient();
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => APIClient.apikeys.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ApiKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: ApiKeys.detail(apikey.id) });
+
+      toast.custom((tst) => (
+        <Toast
+          type="success"
+          body={t("forms.apiKey.deleted", { name: apikey?.name })}
+          t={tst}
+        />
+      ));
+    }
+  });
+
+  return (
+    <li className="text-gray-500 dark:text-gray-400">
+      <APIKeyUpdateForm isOpen={updateFormIsOpen} toggle={toggleUpdateForm} data={apikey} />
+
+      <DeleteModal
+        isOpen={deleteModalIsOpen}
+        isLoading={deleteMutation.isPending}
+        toggle={toggleDeleteModal}
+        buttonRef={cancelModalButtonRef}
+        deleteAction={() => {
+          deleteMutation.mutate(apikey.id);
+          toggleDeleteModal();
+        }}
+        title={t("forms.apiKey.removeTitle", { name: apikey.name })}
+        text={t("forms.apiKey.removeText")}
+      />
+
+      <div className="sm:grid grid-cols-12 gap-4 items-center py-2">
+        <div className="col-span-4 px-2 sm:px-6 py-2 sm:py-0 truncate block sm:text-sm text-md font-medium text-gray-900 dark:text-white">
+          <div className="flex justify-between">
+            <div className="pl-1 py-2">{apikey.name}</div>
+            <div className="sm:hidden">
+              <button
+                className={classNames(
+                  "cursor-pointer",
+                  "text-gray-900 dark:text-gray-300",
+                  "font-medium group rounded-md items-center px-2 py-2 text-sm"
+                )}
+                onClick={toggleUpdateForm}
+                title={t("forms.apiKey.editKey")}
+              >
+                <PencilSquareIcon className="w-5 h-5" aria-hidden="true" />
+              </button>
+              <button
+                className={classNames(
+                  "cursor-pointer",
+                  "text-gray-900 dark:text-gray-300",
+                  "font-medium group rounded-md items-center px-2 py-2 text-sm"
+                )}
+                onClick={toggleDeleteModal}
+                title={t("forms.apiKey.deleteKey")}
+              >
+                <TrashIcon
+                  className="text-red-500 w-5 h-5"
+                  aria-hidden="true"
+                />
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="col-span-7 flex flex-wrap gap-1 px-2 sm:px-0 py-2 sm:py-0">
+          <APIKeyScopes scopes={apikey.scopes} />
+        </div>
+
+        <div className="col-span-1 hidden sm:flex items-center text-sm font-medium text-gray-900 dark:text-white">
+          <button
+            className={classNames(
+              "cursor-pointer",
+              "text-gray-900 dark:text-gray-300",
+              "font-medium group flex rounded-md items-center px-2 py-2 text-sm"
+            )}
+            onClick={toggleUpdateForm}
+            title={t("forms.apiKey.editKey")}
+          >
+            <PencilSquareIcon className="w-5 h-5" aria-hidden="true" />
+          </button>
+          <button
+            className={classNames(
+              "cursor-pointer",
+              "text-gray-900 dark:text-gray-300",
+              "font-medium group flex rounded-md items-center px-2 py-2 text-sm"
+            )}
+            onClick={toggleDeleteModal}
+            title={t("forms.apiKey.deleteKey")}
+          >
+            <TrashIcon className="text-red-500 w-5 h-5" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+    </li>
+  );
+}
+
+interface APIKeyScopesProps {
+  scopes: string[];
+}
+
+const APIKeyScopes = ({ scopes }: APIKeyScopesProps) => {
+  const { t } = useTranslation("settings");
+
+  return scopes.map((scope) => {
+    const [resource, access] = scope.split(":");
+
+    return (
+      <span
+        key={scope}
+        className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-400"
+      >
+        {t(`forms.apiKey.resources.${resource}.label`)}: {t(`forms.apiKey.accessShort.${access}`)}
+      </span>
+    );
+  });
+};
+
+export default APISettings;

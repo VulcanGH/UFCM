@@ -1,0 +1,200 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package sabnzbd
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/autobrr/autobrr/internal/meta"
+	"github.com/autobrr/autobrr/pkg/errors"
+	"github.com/autobrr/autobrr/pkg/sharedhttp"
+
+	"github.com/rs/zerolog"
+)
+
+type Client struct {
+	addr   string
+	apiKey string
+
+	basicUser string
+	basicPass string
+
+	log zerolog.Logger
+
+	http      *http.Client
+	userAgent string
+}
+
+// ErrRequestRejected identifies an explicit HTTP refusal before a job was accepted.
+var ErrRequestRejected = errors.Sentinel("SABnzbd rejected the request")
+
+type Options struct {
+	Addr   string
+	ApiKey string
+
+	BasicUser string
+	BasicPass string
+
+	TLSSkipVerify bool
+
+	Log zerolog.Logger
+}
+
+func New(opts Options) *Client {
+	transport := sharedhttp.Transport
+	if opts.TLSSkipVerify {
+		transport = sharedhttp.TransportTLSInsecure
+	}
+
+	return &Client{
+		addr:      opts.Addr,
+		apiKey:    opts.ApiKey,
+		basicUser: opts.BasicUser,
+		basicPass: opts.BasicPass,
+		log:       opts.Log,
+		http: &http.Client{
+			Timeout:   time.Second * 60,
+			Transport: transport,
+		},
+		userAgent: meta.GetUserAgent(),
+	}
+}
+
+func (c *Client) AddFromUrl(ctx context.Context, r AddNzbRequest) (*AddFileResponse, error) {
+	v := url.Values{}
+	v.Set("mode", "addurl")
+	v.Set("name", r.Url)
+	v.Set("output", "json")
+	v.Set("apikey", c.apiKey)
+	v.Set("cat", "*")
+	if r.Name != "" {
+		v.Set("nzbname", r.Name)
+	}
+
+	if r.Category != "" {
+		v.Set("cat", r.Category)
+	}
+
+	addr, err := url.JoinPath(c.addr, "/api")
+	if err != nil {
+		return nil, err
+	}
+
+	u, err := url.Parse(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	u.RawQuery = v.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.basicUser != "" && c.basicPass != "" {
+		req.SetBasicAuth(c.basicUser, c.basicPass)
+	}
+
+	req.Header.Set("User-Agent", c.userAgent)
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer sharedhttp.DrainAndClose(res)
+	if res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusNotFound {
+		return nil, ErrRequestRejected
+	}
+	if res.StatusCode != http.StatusOK {
+		return nil, errors.New("SABnzbd request failed")
+	}
+
+	body := bufio.NewReader(res.Body)
+	if _, err := body.Peek(1); err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+		return nil, errors.Wrap(err, "could not read body")
+	}
+
+	var data AddFileResponse
+	if err := json.NewDecoder(body).Decode(&data); err != nil {
+		return nil, errors.Wrap(err, "could not unmarshal body")
+	}
+
+	return &data, nil
+}
+
+func (c *Client) Version(ctx context.Context) (*VersionResponse, error) {
+	v := url.Values{}
+	v.Set("mode", "version")
+	v.Set("output", "json")
+	v.Set("apikey", c.apiKey)
+
+	addr, err := url.JoinPath(c.addr, "/api")
+	if err != nil {
+		return nil, err
+	}
+
+	u, err := url.Parse(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	u.RawQuery = v.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.basicUser != "" && c.basicPass != "" {
+		req.SetBasicAuth(c.basicUser, c.basicPass)
+	}
+
+	req.Header.Set("User-Agent", c.userAgent)
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer sharedhttp.DrainAndClose(res)
+
+	body := bufio.NewReader(res.Body)
+	if _, err := body.Peek(1); err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+		return nil, errors.Wrap(err, "could not read body")
+	}
+
+	var data VersionResponse
+	if err := json.NewDecoder(body).Decode(&data); err != nil {
+		return nil, errors.Wrap(err, "could not unmarshal body")
+	}
+
+	return &data, nil
+}
+
+type VersionResponse struct {
+	Version string `json:"version"`
+}
+
+type AddFileResponse struct {
+	Status bool     `json:"status"`
+	NzoIDs []string `json:"nzo_ids"`
+	ApiError
+}
+
+type ApiError struct {
+	ErrorMsg string `json:"error,omitempty"`
+}
+
+type AddNzbRequest struct {
+	Name     string
+	Url      string
+	Category string
+}

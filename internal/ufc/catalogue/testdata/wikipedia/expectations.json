@@ -1,0 +1,418 @@
+[
+  {
+    "index": 0,
+    "cohort": "upcoming",
+    "title": "UFC Fight Night: Salkilld vs. Saint Denis",
+    "name": "UFC Fight Night: Salkilld vs. Saint Denis",
+    "date": "2027-02-07",
+    "page_id": 84610758,
+    "revision": 1384155219,
+    "aliases": {
+      "fight_night": "298"
+    },
+    "headliners": [
+      "Salkilld",
+      "Saint Denis"
+    ]
+  },
+  {
+    "index": 1,
+    "cohort": "upcoming",
+    "title": "UFC 336",
+    "name": "UFC 336: Van vs. Kape",
+    "date": "2027-01-30",
+    "page_id": 84550271,
+    "revision": 1384154958,
+    "aliases": {
+      "numbered": "336"
+    },
+    "headliners": [
+      "Van",
+      "Kape"
+    ]
+  },
+  {
+    "index": 2,
+    "cohort": "upcoming",
+    "title": "UFC Fight Night 297",
+    "name": "UFC Fight Night 297",
+    "date": "2027-01-23",
+    "page_id": 84692824,
+    "revision": 1383965821,
+    "aliases": {
+      "fight_night": "297"
+    },
+    "headliners": null
+  },
+  {
+    "index": 3,
+    "cohort": "upcoming",
+    "title": "UFC Fight Night 296",
+    "name": "UFC Fight Night 296",
+    "date": "2027-01-16",
+    "page_id": 84446476,
+    "revision": 1383965586,
+    "aliases": {
+      "fight_night": "296"
+    },
+    "headliners": null
+  },
+  {
+    "index": 4,
+    "cohort": "upcoming",
+    "title": "UFC 335",
+    "name": "UFC 335: Oliveira vs. Lopes",
+    "date": "2026-12-12",
+    "page_id": 84043308,
+    "revision": 1384765434,
+    "aliases": {
+      "numbered": "335"
+    },
+    "headliners": [
+      "Oliveira",
+      "Lopes"
+    ]
+  },
+  {
+    "index": 5,
+    "cohort": "upcoming",
+    "title": "UFC Fight Night: Adesanya vs. Magomedov",
+    "name": "UFC Fight Night: Adesanya vs. Magomedov",
+    "date": "2026-12-05",
+    "page_id": 84365112,
+    "revision": 1384765309,
+    "aliases": {
+      "fight_night": "295"
+    },
+    "headliners": [
+      "Adesanya",
+      "Magomedov"
+    ]
+  },
+  {
+    "index": 6,
+    "cohort": "upcoming",
+    "title": "UFC Fight Night: Procházka vs. Stirling",
+    "name": "UFC Fight Night: Procházka vs. Stirling",
+    "date": "2026-11-21",
+    "page_id": 84260126,
+    "revision": 1384753649,
+    "aliases": {
+      "fight_night": "294"
+    },
+    "headliners": [
+      "Prochazka",
+      "Stirling"
+    ]
+  },
+  {
+    "index": 7,
+    "cohort": "upcoming",
+    "title": "UFC 334",
+    "name": "UFC 334: Gane vs. Hokit",
+    "date": "2026-11-14",
+    "page_id": 84042054,
+    "revision": 1384492107,
+    "aliases": {
+      "numbered": "334"
+    },
+    "headliners": [
+      "Gane",
+      "Hokit"
+    ]
+  },
+  {
+    "index": 8,
+    "cohort": "recent",
+    "title": "UFC Fight Night: Cortes-Acosta vs. Walker",
+    "name": "UFC Fight Night: Cortes-Acosta vs. Walker",
+    "date": "2026-11-07",
+    "page_id": 83988042,
+    "revision": 1384559117,
+    "aliases": {
+      "fight_night": "293",
+      "vegas": "124"
+    },
+    "headliners": [
+      "Cortes Acosta",
+      "Walker"
+    ]
+  },
+  {
+    "index": 9,
+    "cohort": "recent",
+    "title": "UFC Fight Night: Moicano vs. Nolan",
+    "name": "UFC Fight Night: Moicano vs. Nolan",
+    "date": "2026-10-31",
+    "page_id": 84025814,
+    "revision": 1384072242,
+    "aliases": {
+      "fight_night": "292",
+      "vegas": "123"
+    },
+    "headliners": [
+      "Moicano",
+      "Nolan"
+    ]
+  },
+  {
+    "index": 10,
+    "cohort": "recent",
+    "title": "UFC 333",
+    "name": "UFC 333: Volkanovski vs. Evloev",
+    "date": "2026-10-24",
+    "page_id": 83785572,
+    "revision": 1382905897,
+    "aliases": {
+      "numbered": "333"
+    },
+    "headliners": [
+      "Volkanovski",
+      "Evloev"
+    ]
+  },
+  {
+    "index": 11,
+    "cohort": "recent",
+    "title": "UFC Fight Night: Buckley vs. Malott",
+    "name": "UFC Fight Night: Buckley vs. Malott",
+    "date": "2026-10-17",
+    "page_id": 83805852,
+    "revision": 1381316684,
+    "aliases": {
+      "fight_night": "291"
+    },
+    "headliners": [
+      "Buckley",
+      "Malott"
+    ]
+  },
+  {
+    "index": 12,
+    "cohort": "recent",
+    "title": "UFC Fight Night: Allen vs. Duncan",
+    "name": "UFC Fight Night: Allen vs. Duncan",
+    "date": "2026-10-10",
+    "page_id": 83736532,
+    "revision": 1381316906,
+    "aliases": {
+      "fight_night": "290",
+      "vegas": "122"
+    },
+    "headliners": [
+      "Allen",
+      "Duncan"
+    ]
+  },
+  {
+    "index": 13,
+    "cohort": "recent",
+    "title": "UFC 332",
+    "name": "UFC 332: Silva vs. Wang",
+    "date": "2026-10-03",
+    "page_id": 83826247,
+    "revision": 1381317049,
+    "aliases": {
+      "numbered": "332"
+    },
+    "headliners": [
+      "Silva",
+      "Wang"
+    ]
+  },
+  {
+    "index": 14,
+    "cohort": "recent",
+    "title": "UFC Fight Night: Rosas Jr. vs. Barcelos",
+    "name": "UFC Fight Night: Rosas Jr. vs. Barcelos",
+    "date": "2026-09-26",
+    "page_id": 83718324,
+    "revision": 1383318022,
+    "aliases": {
+      "fight_night": "289",
+      "vegas": "121"
+    },
+    "headliners": [
+      "Rosas",
+      "Barcelos"
+    ]
+  },
+  {
+    "index": 15,
+    "cohort": "recent",
+    "title": "UFC 331",
+    "name": "UFC 331: Van vs. Pantoja 2",
+    "date": "2026-09-19",
+    "page_id": 83648230,
+    "revision": 1381835812,
+    "aliases": {
+      "numbered": "331"
+    },
+    "headliners": [
+      "Van",
+      "Pantoja"
+    ]
+  },
+  {
+    "index": 16,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC 1",
+    "name": "UFC 1: The Beginning",
+    "date": "1993-11-12",
+    "page_id": 4294827,
+    "revision": 1377381118,
+    "aliases": {
+      "numbered": "1"
+    },
+    "headliners": null
+  },
+  {
+    "index": 17,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC 100",
+    "name": "UFC 100",
+    "date": "2009-07-11",
+    "page_id": 21101073,
+    "revision": 1372136744,
+    "aliases": {
+      "numbered": "100"
+    },
+    "headliners": [
+      "Lesnar",
+      "Mir"
+    ]
+  },
+  {
+    "index": 18,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC 200",
+    "name": "UFC 200: Tate vs. Nunes",
+    "date": "2016-07-09",
+    "page_id": 48625599,
+    "revision": 1372784789,
+    "aliases": {
+      "numbered": "200"
+    },
+    "headliners": [
+      "Tate",
+      "Nunes"
+    ]
+  },
+  {
+    "index": 19,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC 249",
+    "name": "UFC 249: Ferguson vs. Gaethje",
+    "date": "2020-05-09",
+    "page_id": 62581056,
+    "revision": 1336221891,
+    "aliases": {
+      "numbered": "249"
+    },
+    "headliners": [
+      "Ferguson",
+      "Gaethje"
+    ]
+  },
+  {
+    "index": 20,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC 300",
+    "name": "UFC 300: Pereira vs. Hill",
+    "date": "2024-04-13",
+    "page_id": 75575357,
+    "revision": 1361110039,
+    "aliases": {
+      "numbered": "300"
+    },
+    "headliners": [
+      "Pereira",
+      "Hill"
+    ]
+  },
+  {
+    "index": 21,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC 303",
+    "name": "UFC 303: Pereira vs. Procházka 2",
+    "date": "2024-06-29",
+    "page_id": 76185553,
+    "revision": 1345880741,
+    "aliases": {
+      "numbered": "303"
+    },
+    "headliners": [
+      "Pereira",
+      "Prochazka"
+    ]
+  },
+  {
+    "index": 22,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC Fight Night: Hendricks vs. Thompson",
+    "name": "UFC Fight Night: Hendricks vs. Thompson",
+    "date": "2016-02-06",
+    "page_id": 48464855,
+    "revision": 1354451626,
+    "aliases": {
+      "fight_night": "82"
+    },
+    "headliners": [
+      "Hendricks",
+      "Thompson"
+    ]
+  },
+  {
+    "index": 23,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC Fight Night: Magny vs. Prates",
+    "name": "UFC Fight Night: Magny vs. Prates",
+    "date": "2024-11-09",
+    "page_id": 77488221,
+    "revision": 1268600397,
+    "aliases": {
+      "fight_night": "247",
+      "vegas": "100",
+      "espn_plus": "105"
+    },
+    "headliners": [
+      "Magny",
+      "Prates"
+    ]
+  },
+  {
+    "index": 24,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC Fight Night: Costa vs. Vettori",
+    "name": "UFC Fight Night: Costa vs. Vettori",
+    "date": "2021-10-23",
+    "page_id": 67616491,
+    "revision": 1305612779,
+    "aliases": {
+      "fight_night": "196",
+      "vegas": "41",
+      "espn_plus": "54"
+    },
+    "headliners": [
+      "Costa",
+      "Vettori"
+    ]
+  },
+  {
+    "index": 25,
+    "cohort": "historical/aliases/renamed",
+    "title": "UFC on ESPN: Holm vs. Bueno Silva",
+    "name": "UFC on ESPN: Holm vs. Bueno Silva",
+    "date": "2023-07-15",
+    "page_id": 73606794,
+    "revision": 1352548546,
+    "aliases": {
+      "vegas": "77",
+      "espn": "49"
+    },
+    "headliners": [
+      "Holm",
+      "Bueno Silva"
+    ]
+  }
+]

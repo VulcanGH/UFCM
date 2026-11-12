@@ -1,0 +1,159 @@
+# config.toml
+
+# Hostname / IP
+#
+# Default: "127.0.0.1"
+#
+host = "127.0.0.1"
+
+# Port
+#
+# Default: 7474
+#
+port = 7474
+
+# Base url
+# Set custom baseUrl eg /autobrr/ to serve in subdirectory.
+# Not needed for subdomain, or by accessing with the :port directly.
+#
+# Optional
+#
+#baseUrl = "/autobrr/"
+
+# Base url mode legacy
+# This is kept for compatibility with older versions doing url rewrite on the proxy.
+# If you use baseUrl you can set this to false and skip any url rewrite in your proxy.
+#
+# Default: true
+#
+baseUrlModeLegacy = true
+
+# autobrr logs file
+# If not defined, logs to stdout
+#
+# Optional
+#
+#logPath = "/path/to/logs/autobrr.log"
+
+# Log level
+#
+# Default: "DEBUG"
+#
+# Options: "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
+#
+logLevel = "TRACE"
+
+# Log Max Size
+#
+# Default: 10
+#
+# Max log size in megabytes
+#
+#logMaxSize = 10
+
+# Log Max Backups
+#
+# Default: 5
+#
+# Max amount of old log files
+#
+#logMaxBackups = 5
+
+# Check for updates
+#
+# Default: true
+#
+checkForUpdates = true
+
+# Database configuration
+#
+#databaseType = "postgres"
+#databaseDSN = "postgresql://autobrr:postgres@localhost:5432/autobrr?sslmode=disable"
+#
+#databaseType = "sqlite"
+#databaseDSN = "file:/config/data/autobrr.db"
+#
+# Use databaseDSN or the individual fields
+#
+#postgresHost = "localhost"
+#
+#postgresPort = 5432
+#
+#postgresUser = "autobrr"
+#
+#postgresPass = "postgres"
+#
+#postgresDatabase = "autobrr"
+#
+#postgresSSLMode = "disable"
+#
+# Optional: connect over a unix socket instead of host/port. This is the
+# directory holding the server's .s.PGSQL.<postgresPort> socket, not the
+# socket file itself.
+#
+#postgresSocket = "/run/postgresql"
+#
+# Optional: extra libpq connection parameters in URL query syntax,
+# separated by "&". A key that one of the settings above already sets
+# is an error; set it there instead.
+#
+#postgresExtraParams = "connect_timeout=10&application_name=autobrr"
+
+# OpenID Connect Configuration
+#
+# Enable OIDC authentication
+#oidcEnabled = false
+#
+# OIDC Issuer URL (e.g. https://auth.example.com)
+#oidcIssuer = ""
+#
+# OIDC Client ID
+#oidcClientId = ""
+#
+# OIDC Client Secret
+#oidcClientSecret = ""
+#
+# OIDC Redirect URL (e.g. http://localhost:7474/api/auth/oidc/callback)
+#oidcRedirectUrl = ""
+#
+# Disable Built In Login Form (only works when using external auth)
+#oidcDisableBuiltInLogin = false
+#
+# Redirect unauthenticated visitors to the OIDC provider (requires oidcEnabled)
+# Environment variable: AUTOBRR__OIDC_AUTO_REDIRECT
+#oidcAutoRedirect = false
+#
+# Only allow one OIDC user to log in, by subject identifier (sub) or by the email
+# address the provider has verified. Set one of the two, not both. When neither
+# is set, any user your provider authenticates for this client can log in.
+# The subject is unique per provider; if your provider lets several accounts
+# share an email address, all of them can log in with oidcAllowedEmail.
+# Environment variable: AUTOBRR__OIDC_ALLOWED_SUBJECT
+#oidcAllowedSubject = ""
+#
+# Environment variable: AUTOBRR__OIDC_ALLOWED_EMAIL
+#oidcAllowedEmail = ""
+
+# Metrics
+#
+# Enable metrics endpoint
+#metricsEnabled = true
+
+# Metrics server host
+#
+#metricsHost = "127.0.0.1"
+
+# Metrics server port
+#
+#metricsPort = "9074"
+
+# Metrics basic auth
+#
+# Comma separate list of user:password. Password must be htpasswd bcrypt hashed. Use autobrrctl to generate.
+# Only enabled if correctly set with user:pass.
+#
+#metricsBasicAuthUsers = ""
+
+# Custom definitions
+#
+#customDefinitions = "test/definitions"

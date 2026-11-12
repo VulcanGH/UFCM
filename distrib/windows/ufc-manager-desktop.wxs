@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="UFC Manager" Language="1033" Version="$(var.MsiVersion)"
+           Manufacturer="UFC Manager contributors" UpgradeCode="ded83a6c-0653-4833-979f-3f0a1152b8c6">
+    <Package Description="UFC Manager" InstallerVersion="500" Compressed="yes" InstallPrivileges="elevated" Platform="x64" />
+    <Upgrade Id="ded83a6c-0653-4833-979f-3f0a1152b8c6">
+      <UpgradeVersion Minimum="0.0.0" IncludeMinimum="yes" Maximum="$(var.MsiVersion)" IncludeMaximum="yes" Property="UFC_OLD_PRODUCTS" />
+      <UpgradeVersion Minimum="$(var.MsiVersion)" IncludeMinimum="no" OnlyDetect="yes" Property="UFC_NEWER_PRODUCTS" />
+    </Upgrade>
+    <Property Id="UFC_OLD_PRODUCTS" Secure="yes" />
+    <Property Id="UFC_NEWER_PRODUCTS" Secure="yes" />
+    <Condition Message="A newer UFC Manager version is already installed.">Installed OR NOT UFC_NEWER_PRODUCTS</Condition>
+    <MediaTemplate EmbedCab="yes" />
+    <Condition Message="UFC Manager supports installation for the current user only.">NOT ALLUSERS</Condition>
+    <Icon Id="UFCManagerIcon" SourceFile="$(var.SourceRoot)\distrib\windows\icons\ufcm.ico" />
+    <Property Id="ARPPRODUCTICON" Value="UFCManagerIcon" />
+    <Property Id="INSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="UFCPreviousInstallDir" Root="HKCU" Key="Software\ufc-manager\ufc-manager-desktop" Name="InstallDir" Type="raw" />
+    </Property>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder"><Directory Id="INSTALLFOLDER" Name="UFC Manager"><Directory Id="SEEDFOLDER" Name="seed" /></Directory></Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="UFCManagerLauncherFiles" Guid="c9a4d720-d6df-4c8a-9a24-1a46b66c88ae" Win64="yes">
+        <File Id="UFCManagerLauncherExe" Name="ufc-manager-launcher.exe" Source="$(var.PayloadDir)\ufc-manager-launcher.exe" KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+      </Component>
+      <Component Id="UFCManagerNoticeFiles" Guid="c5294e3c-460e-40b9-b3ca-6c851dadde26" Win64="yes">
+        <File Id="UFCLicense" Name="LICENSE.txt" Source="$(var.PayloadDir)\LICENSE.txt" KeyPath="yes" />
+        <File Id="UFCReadme" Name="README.txt" Source="$(var.PayloadDir)\README.txt" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="SEEDFOLDER">
+      <Component Id="UFCManagerSeedFiles" Guid="ec52499c-2d9f-4c60-9bac-d0cf85bca40c" Win64="yes">
+        <File Id="UFCManagerDesktopExe" Name="ufc-manager-desktop.exe" Source="$(var.PayloadDir)\seed\ufc-manager-desktop.exe" KeyPath="yes" />
+        <File Id="UFCManagerCLI" Name="ufc-manager.exe" Source="$(var.PayloadDir)\seed\ufc-manager.exe" />
+        <File Id="UFCSeedMetadata" Name="seed.json" Source="$(var.PayloadDir)\seed\seed.json" />
+        <File Id="UFCSeedLicense" Name="LICENSE.txt" Source="$(var.PayloadDir)\seed\LICENSE.txt" />
+        <File Id="UFCSeedReadme" Name="README.txt" Source="$(var.PayloadDir)\seed\README.txt" />
+        <RemoveFolder Id="RemoveSeedFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="UFCManagerLauncher" Guid="ce87e3a6-0344-4ddb-a50f-c8f2144377c6" Win64="yes">
+        <RegistryValue Root="HKCU" Key="Software\ufc-manager\ufc-manager-desktop" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\ufc-manager\ufc-manager-desktop" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" />
+        <Shortcut Id="UFCManagerStartMenu" Name="UFC Manager" Target="[INSTALLFOLDER]ufc-manager-launcher.exe" WorkingDirectory="INSTALLFOLDER" Icon="UFCManagerIcon" />
+      </Component>
+      <Component Id="UFCManagerNotices" Guid="58236526-ad5c-4db9-857b-afb88b246b96" Win64="yes">
+        <RegistryValue Root="HKCU" Key="Software\ufc-manager\ufc-manager-desktop" Name="ToolsInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="UFCManagerSeed" Guid="d448d01a-5471-44a9-9f80-4c39514615dc" Win64="yes">
+        <RegistryValue Root="HKCU" Key="Software\ufc-manager\ufc-manager-desktop" Name="SeedInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <Feature Id="Complete" Level="1"><ComponentRef Id="UFCManagerLauncher" /><ComponentRef Id="UFCManagerNotices" /><ComponentRef Id="UFCManagerSeed" /><ComponentRef Id="UFCManagerLauncherFiles" /><ComponentRef Id="UFCManagerNoticeFiles" /><ComponentRef Id="UFCManagerSeedFiles" /></Feature>
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <UIRef Id="WixUI_InstallDir" />
+    <Binary Id="UFCMaintenanceHelper" SourceFile="$(var.PayloadDir)\ufc-manager-launcher.exe" />
+    <CustomAction Id="UFCMaintenanceBegin" BinaryKey="UFCMaintenanceHelper" ExeCommand="--maintenance-begin --maintenance-install-dir &quot;[INSTALLFOLDER].&quot; --maintenance-cache-dir &quot;[LocalAppDataFolder].&quot; --config &quot;[AppDataFolder]ufc-manager&quot; --maintenance-lease &quot;[ProductCode]&quot;" Execute="immediate" Impersonate="yes" Return="check" />
+    <CustomAction Id="UFCMaintenanceCommit" BinaryKey="UFCMaintenanceHelper" ExeCommand="--maintenance-end --maintenance-install-dir &quot;[INSTALLFOLDER].&quot; --maintenance-cache-dir &quot;[LocalAppDataFolder].&quot; --config &quot;[AppDataFolder]ufc-manager&quot; --maintenance-lease &quot;[ProductCode]&quot;" Execute="commit" Impersonate="yes" Return="check" />
+    <CustomAction Id="UFCUninstallCleanup" FileKey="UFCManagerDesktopExe" ExeCommand="uninstall-cleanup" Return="check" />
+    <CustomAction Id="StartUFCManager" FileKey="UFCManagerLauncherExe" ExeCommand="" Return="asyncNoWait" />
+    <InstallExecuteSequence>
+      <FindRelatedProducts Before="LaunchConditions" />
+      <Custom Action="UFCMaintenanceBegin" After="InstallInitialize">NOT UPGRADINGPRODUCTCODE</Custom>
+      <RemoveExistingProducts After="UFCMaintenanceBegin" />
+      <Custom Action="UFCMaintenanceCommit" Before="InstallFinalize">NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="UFCUninstallCleanup" Before="RemoveFiles">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="StartUFCManager" After="InstallFinalize">NOT Installed AND UILevel &gt; 2</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

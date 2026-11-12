@@ -1,0 +1,522 @@
+// Copyright (c) 2021 - 2025, Ludvig Lundgren and the autobrr contributors.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package http
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+
+	"github.com/autobrr/autobrr/internal/domain"
+	"github.com/autobrr/autobrr/pkg/errors"
+
+	"github.com/go-chi/chi/v5"
+)
+
+type releaseService interface {
+	Find(ctx context.Context, query domain.ReleaseQueryParams) (*domain.FindReleasesResponse, error)
+	Get(ctx context.Context, req *domain.GetReleaseRequest) (*domain.Release, error)
+	GetIndexerOptions(ctx context.Context) ([]string, error)
+	Stats(ctx context.Context) (*domain.ReleaseStats, error)
+	StatsActivity(ctx context.Context, days int) (*domain.ReleaseActivityStats, error)
+	StatsVolume(ctx context.Context, days int) (*domain.ReleaseVolumeStats, error)
+	StatsHeatmap(ctx context.Context, days int) (*domain.ReleaseHeatmapStats, error)
+	StatsTopIndexers(ctx context.Context, days int) (*domain.ReleaseTopIndexersStats, error)
+	StatsTopFilters(ctx context.Context, days int) (*domain.ReleaseTopFiltersStats, error)
+	Delete(ctx context.Context, req *domain.DeleteReleaseRequest) error
+	Retry(ctx context.Context, req *domain.ReleaseActionRetryReq) error
+	ProcessManual(ctx context.Context, req *domain.ReleaseProcessReq) error
+
+	StoreReleaseProfileDuplicate(ctx context.Context, profile *domain.DuplicateReleaseProfile) error
+	FindDuplicateReleaseProfiles(ctx context.Context) ([]*domain.DuplicateReleaseProfile, error)
+	DeleteReleaseProfileDuplicate(ctx context.Context, id int64) error
+
+	ListCleanupJobs(ctx context.Context) ([]*domain.ReleaseCleanupJob, error)
+	GetCleanupJob(ctx context.Context, id int) (*domain.ReleaseCleanupJob, error)
+	StoreCleanupJob(ctx context.Context, job *domain.ReleaseCleanupJob) error
+	UpdateCleanupJob(ctx context.Context, job *domain.ReleaseCleanupJob) error
+	DeleteCleanupJob(ctx context.Context, id int) error
+	ToggleCleanupJobEnabled(ctx context.Context, id int, enabled bool) error
+	ForceRunCleanupJob(ctx context.Context, id int) error
+}
+
+type releaseHandler struct {
+	encoder encoder
+	service releaseService
+}
+
+func newReleaseHandler(encoder encoder, service releaseService) *releaseHandler {
+	return &releaseHandler{
+		encoder: encoder,
+		service: service,
+	}
+}
+
+func (h releaseHandler) Routes(r chi.Router) {
+	read := requireScope(domain.APIResourceReleases, domain.APIAccessRead)
+	invoke := requireScope(domain.APIResourceReleases, domain.APIAccessInvoke)
+	write := requireScope(domain.APIResourceReleases, domain.APIAccessWrite)
+
+	r.With(read).Get("/", h.findReleases)
+	r.With(read).Get("/recent", h.findRecentReleases)
+	r.With(read).Get("/stats", h.getStats)
+	r.With(read).Get("/stats/activity", h.statsHandler(func(ctx context.Context, days int) (any, error) {
+		return h.service.StatsActivity(ctx, days)
+	}))
+	r.With(read).Get("/stats/volume", h.statsHandler(func(ctx context.Context, days int) (any, error) {
+		return h.service.StatsVolume(ctx, days)
+	}))
+	r.With(read).Get("/stats/heatmap", h.statsHandler(func(ctx context.Context, days int) (any, error) {
+		return h.service.StatsHeatmap(ctx, days)
+	}))
+	r.With(read).Get("/stats/indexers", h.statsHandler(func(ctx context.Context, days int) (any, error) {
+		return h.service.StatsTopIndexers(ctx, days)
+	}))
+	r.With(read).Get("/stats/filters", h.statsHandler(func(ctx context.Context, days int) (any, error) {
+		return h.service.StatsTopFilters(ctx, days)
+	}))
+	r.With(read).Get("/indexers", h.getIndexerOptions)
+	r.With(write).Delete("/", h.deleteReleases)
+
+	//r.Post("/process", h.retryAction)
+
+	r.Route("/{releaseID}", func(r chi.Router) {
+		r.With(read).Get("/", h.getReleaseByID)
+		r.With(invoke).Post("/actions/{actionStatusID}/retry", h.retryAction)
+	})
+
+	r.Route("/profiles/duplicate", func(r chi.Router) {
+		r.With(read).Get("/", h.findReleaseProfileDuplicate)
+		r.With(write).Post("/", h.storeReleaseProfileDuplicate)
+
+		r.With(write).Delete("/{profileID}", h.deleteReleaseProfileDuplicate)
+	})
+
+	r.Route("/cleanup-jobs", func(r chi.Router) {
+		r.With(read).Get("/", h.listCleanupJobs)
+		r.With(write).Post("/", h.storeCleanupJob)
+
+		r.Route("/{jobID}", func(r chi.Router) {
+			r.With(read).Get("/", h.getCleanupJob)
+			r.With(write).Put("/", h.updateCleanupJob)
+			r.With(write).Delete("/", h.deleteCleanupJob)
+			r.With(write).Patch("/enabled", h.toggleCleanupJobEnabled)
+			r.With(invoke).Post("/run", h.forceRunCleanupJob)
+		})
+	})
+}
+
+func (h releaseHandler) findReleases(w http.ResponseWriter, r *http.Request) {
+	limit, err := parseQueryParamInt(r, "limit", 20)
+	if err != nil || limit == 0 {
+		h.encoder.BadRequestErr(w, errors.New("limit parameter is invalid"))
+		return
+	}
+
+	offset, err := parseQueryParamInt(r, "offset", 0)
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	cursor, err := parseQueryParamInt(r, "cursor", 0)
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	indexer := r.URL.Query()["indexer"]
+
+	pushStatus := r.URL.Query().Get("push_status")
+	if pushStatus != "" && !domain.ValidReleasePushStatus(pushStatus) {
+		h.encoder.BadRequestErr(w, errors.New("push_status parameter is of invalid type: %v", pushStatus))
+		return
+	}
+
+	search := r.URL.Query().Get("q")
+
+	query := domain.ReleaseQueryParams{
+		Limit:  uint64(limit),
+		Offset: uint64(offset),
+		Cursor: uint64(cursor),
+		Sort:   nil,
+		Filters: struct {
+			Indexers   []string
+			PushStatus string
+		}{Indexers: indexer, PushStatus: pushStatus},
+		Search: search,
+	}
+
+	resp, err := h.service.Find(r.Context(), query)
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, resp)
+}
+
+func (h releaseHandler) findRecentReleases(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.service.Find(r.Context(), domain.ReleaseQueryParams{Limit: 10})
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, resp)
+}
+
+func (h releaseHandler) getReleaseByID(w http.ResponseWriter, r *http.Request) {
+	releaseID, err := parseURLParamInt(r, "releaseID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	release, err := h.service.Get(r.Context(), &domain.GetReleaseRequest{Id: releaseID})
+	if err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("could not find release with id %d", releaseID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, release)
+}
+
+func (h releaseHandler) getIndexerOptions(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.service.GetIndexerOptions(r.Context())
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, stats)
+}
+
+func (h releaseHandler) getStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.service.Stats(r.Context())
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, stats)
+}
+
+func (h releaseHandler) statsHandler(fetch func(ctx context.Context, days int) (any, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		days, err := parseQueryParamInt(r, "days", 30)
+		if err != nil || days > 3650 {
+			h.encoder.BadRequestErr(w, errors.New("days parameter is invalid"))
+			return
+		}
+
+		stats, err := fetch(r.Context(), days)
+		if err != nil {
+			h.encoder.Error(w, err)
+			return
+		}
+
+		h.encoder.StatusResponse(w, http.StatusOK, stats)
+	}
+}
+
+func (h releaseHandler) deleteReleases(w http.ResponseWriter, r *http.Request) {
+	req := domain.DeleteReleaseRequest{}
+
+	olderThan, err := parseQueryParamInt(r, "olderThan", 0)
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+	req.OlderThan = olderThan
+
+	indexers := r.URL.Query()["indexer"]
+	if len(indexers) > 0 {
+		req.Indexers = indexers
+	}
+
+	releaseStatuses := r.URL.Query()["releaseStatus"]
+	validStatuses := map[string]bool{
+		"PUSH_APPROVED": true,
+		"PUSH_REJECTED": true,
+		"PUSH_ERROR":    true,
+		"PENDING":       true,
+	}
+	var filteredStatuses []string
+	for _, status := range releaseStatuses {
+		if _, valid := validStatuses[status]; valid {
+			filteredStatuses = append(filteredStatuses, status)
+		} else {
+			h.encoder.BadRequestErr(w, errors.New("releaseStatus contains invalid value: %v", status))
+			return
+		}
+	}
+	req.ReleaseStatuses = filteredStatuses
+
+	if err := h.service.Delete(r.Context(), &req); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.NoContent(w)
+}
+
+func (h releaseHandler) process(w http.ResponseWriter, r *http.Request) {
+	var req *domain.ReleaseProcessReq
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if req.IndexerIdentifier == "" {
+		h.encoder.BadRequestErr(w, errors.New("field indexer_identifier empty"))
+		return
+	}
+
+	if len(req.AnnounceLines) == 0 {
+		h.encoder.BadRequestErr(w, errors.New("field announce_lines empty"))
+		return
+	}
+
+	err = h.service.ProcessManual(r.Context(), req)
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.NoContent(w)
+}
+
+func (h releaseHandler) retryAction(w http.ResponseWriter, r *http.Request) {
+	releaseID, err := parseURLParamInt(r, "releaseID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	actionStatusId, err := parseURLParamInt(r, "actionStatusID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	req := &domain.ReleaseActionRetryReq{
+		ReleaseId:      releaseID,
+		ActionStatusId: actionStatusId,
+	}
+
+	if err := h.service.Retry(r.Context(), req); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("action status with id %d not found for release %d", actionStatusId, releaseID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.NoContent(w)
+}
+
+func (h releaseHandler) storeReleaseProfileDuplicate(w http.ResponseWriter, r *http.Request) {
+	var data *domain.DuplicateReleaseProfile
+
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if err := h.service.StoreReleaseProfileDuplicate(r.Context(), data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusCreatedData(w, data)
+}
+
+func (h releaseHandler) findReleaseProfileDuplicate(w http.ResponseWriter, r *http.Request) {
+	profiles, err := h.service.FindDuplicateReleaseProfiles(r.Context())
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, profiles)
+}
+
+func (h releaseHandler) deleteReleaseProfileDuplicate(w http.ResponseWriter, r *http.Request) {
+	profileID, err := parseURLParamInt(r, "profileID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	if err := h.service.DeleteReleaseProfileDuplicate(r.Context(), int64(profileID)); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("duplicate release profile with id %d not found", profileID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.NoContent(w)
+}
+
+// Cleanup job handlers
+
+func (h releaseHandler) listCleanupJobs(w http.ResponseWriter, r *http.Request) {
+	jobs, err := h.service.ListCleanupJobs(r.Context())
+	if err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, jobs)
+}
+
+func (h releaseHandler) getCleanupJob(w http.ResponseWriter, r *http.Request) {
+	jobID, err := parseURLParamInt(r, "jobID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	job, err := h.service.GetCleanupJob(r.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("could not find cleanup job with id %d", jobID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, job)
+}
+
+func (h releaseHandler) storeCleanupJob(w http.ResponseWriter, r *http.Request) {
+	var data *domain.ReleaseCleanupJob
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if err := h.service.StoreCleanupJob(r.Context(), data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusCreated, data)
+}
+
+func (h releaseHandler) updateCleanupJob(w http.ResponseWriter, r *http.Request) {
+	jobID, err := parseURLParamInt(r, "jobID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	var data *domain.ReleaseCleanupJob
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if data == nil {
+		h.encoder.BadRequestErr(w, errors.New("cleanup job is required"))
+		return
+	}
+
+	data.ID = jobID
+
+	if err := h.service.UpdateCleanupJob(r.Context(), data); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("could not find cleanup job with id %d", jobID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusOK, data)
+}
+
+func (h releaseHandler) deleteCleanupJob(w http.ResponseWriter, r *http.Request) {
+	jobID, err := parseURLParamInt(r, "jobID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	if err := h.service.DeleteCleanupJob(r.Context(), jobID); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("could not find cleanup job with id %d", jobID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.NoContent(w)
+}
+
+func (h releaseHandler) toggleCleanupJobEnabled(w http.ResponseWriter, r *http.Request) {
+	jobID, err := parseURLParamInt(r, "jobID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	var data struct {
+		Enabled bool `json:"enabled"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.encoder.Error(w, err)
+		return
+	}
+
+	if err := h.service.ToggleCleanupJobEnabled(r.Context(), jobID, data.Enabled); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("could not find cleanup job with id %d", jobID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusNoContent, nil)
+}
+
+func (h releaseHandler) forceRunCleanupJob(w http.ResponseWriter, r *http.Request) {
+	jobID, err := parseURLParamInt(r, "jobID")
+	if err != nil {
+		h.encoder.BadRequestErr(w, err)
+		return
+	}
+
+	if err := h.service.ForceRunCleanupJob(r.Context(), jobID); err != nil {
+		if errors.Is(err, domain.ErrRecordNotFound) {
+			h.encoder.NotFoundErr(w, errors.New("could not find cleanup job with id %d", jobID))
+			return
+		}
+
+		h.encoder.Error(w, err)
+		return
+	}
+
+	h.encoder.StatusResponse(w, http.StatusNoContent, nil)
+}

@@ -1,0 +1,46 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    open-pull-requests-limit: 0
+    directory: /
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "07:00"
+    groups:
+      github:
+        patterns:
+          - "*"
+    # codeql-action moves its floating v4 tag the moment each release publishes,
+    # so the default cooldown makes Dependabot pin v4 to the previous concrete
+    # version. Exclude it so @v4 is compared against the actual latest release.
+    cooldown:
+      exclude: ["github/codeql-action"]
+
+  - package-ecosystem: gomod
+    open-pull-requests-limit: 0
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      golang:
+        patterns:
+          - "*"
+    # Untagged submodule (no semver tags upstream); Dependabot's version
+    # discovery walks up to the v1 parent module and fails to resolve it.
+    # Pin/bump it manually with `go get .../postgresstore@latest`.
+    ignore:
+      - dependency-name: "github.com/alexedwards/scs/postgresstore"
+
+  - package-ecosystem: npm
+    open-pull-requests-limit: 0
+    directory: /web
+    schedule:
+      interval: monthly
+    groups:
+      npm:
+        patterns:
+          - "*"
+    ignore:
+      - dependency-name: "typescript"
+        update-types: [ "version-update:semver-major" ]

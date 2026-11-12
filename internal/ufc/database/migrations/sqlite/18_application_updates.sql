@@ -1,0 +1,8 @@
+CREATE TABLE ufc_update_state (
+ id INTEGER PRIMARY KEY CHECK (id=1), revision BIGINT NOT NULL DEFAULT 0,
+ auto_install BOOLEAN NOT NULL DEFAULT FALSE, highwater BIGINT NOT NULL DEFAULT 0,
+ release_id TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '',
+ phase TEXT NOT NULL DEFAULT 'idle', message TEXT NOT NULL DEFAULT '',
+ envelope TEXT NOT NULL DEFAULT '{}', failed_id TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO ufc_update_state(id) VALUES(1);
