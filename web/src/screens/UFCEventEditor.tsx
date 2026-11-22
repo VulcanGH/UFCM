@@ -18,6 +18,8 @@ import { componentNames, UFC_COMPONENTS } from "@utils/ufcComponents";
 import { useAppForm } from "@hooks/form";
 import { TextField } from "@components/inputs";
 import { eventStatusLabel } from "@utils/ufcEventStatus";
+import { sourceReviewFields } from "@utils/ufcReview";
+import { UFCEventReview } from "./UFCEventReview";
 
 const fields = ["name", "type", "date", "headliners", "status"] as const;
 const labels: Record<UFCEditableField, string> = { name: "Name", type: "Event type", date: "Date", headliners: "Headliners", status: "Status" };
@@ -32,7 +34,7 @@ const defaults = (event: UFCEvent) => ({
   first: event.values.headliners?.[0] ?? "", second: event.values.headliners?.[1] ?? "", status: event.values.status
 });
 
-function EditForm({ event, onClose }: { event: UFCEvent; onClose: () => void }) {
+function EditForm({ event, onClose, onOpen }: { event: UFCEvent; onClose: () => void; onOpen: (id: string) => void }) {
   const queryClient = useQueryClient();
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => { heading.current?.focus(); }, []);
@@ -114,6 +116,12 @@ function EditForm({ event, onClose }: { event: UFCEvent; onClose: () => void }) 
     catch (error) { setReviewError(error instanceof Error ? error.message : "Could not load latest revision"); }
   };
   const changed = Object.keys(operations).length > 0 || Object.keys(componentOperations).length > 0 || !!aliasOperation || !!qualityOperation;
+  useEffect(() => {
+    if (!changed && event.revision > base.revision) {
+      setBase(event);
+      form.reset(defaults(event));
+    }
+  }, [event, base.revision, changed, form]);
   const qualityCustom = qualityOperation ? qualityOperation.mode === "custom" : !!event.quality?.override;
   const qualityDefaults = event.quality?.defaults ?? ["1080p"];
   const qualityValues = qualityOperation ? qualityOperation.mode === "custom" ? qualityOperation.resolutions ?? [] : qualityDefaults : event.quality?.effective ?? qualityDefaults;
@@ -123,7 +131,8 @@ function EditForm({ event, onClose }: { event: UFCEvent; onClose: () => void }) 
 
   return <form.AppForm>
     <form onSubmit={e => { e.preventDefault(); e.stopPropagation(); void form.handleSubmit(); }} className="space-y-4" aria-label="Edit event">
-      <div className="flex items-start justify-between gap-3"><h3 ref={heading} tabIndex={-1} className="text-lg font-semibold">Edit Event</h3><button type="button" onClick={onClose} disabled={save.isPending || remove.isPending} className={compactButton}>Close Editor</button></div>
+      <div className="flex items-start justify-between gap-3"><h3 ref={heading} tabIndex={-1} className="text-lg font-semibold">Edit {event.values.name}</h3><button type="button" onClick={onClose} disabled={save.isPending || remove.isPending} className={compactButton}>Close Editor</button></div>
+      <UFCEventReview event={event} onOpen={onOpen} disabled={changed || save.isPending || remove.isPending} />
       <p className="text-sm text-gray-600 dark:text-gray-400">Changes are protected from refresh by default. A blank date or both blank headliners saves a protected unknown value. {event.source.page_id > 0 ? "Use default restores the Wikipedia value and removes protection when you save." : "This is a local event without a Wikipedia link; it is not automatically merged with imported events."}</p>
       <fieldset disabled={save.isPending} className="space-y-4">
         {fields.map(key => <div key={key} className="space-y-2 rounded-md border border-gray-200 p-3 dark:border-gray-700">
@@ -132,6 +141,8 @@ function EditForm({ event, onClose }: { event: UFCEvent; onClose: () => void }) 
             {event.source.page_id > 0 && <button type="button" onClick={() => reset(key)} aria-label={`Use default for ${labels[key]}`} className={compactButton}>Use Default</button>}
           </div>
           <p className="text-sm">Saved value: {display(event.values, key)}</p>
+          {event.review?.some(reason => sourceReviewFields[reason as keyof typeof sourceReviewFields] === key) &&
+            <button type="button" onClick={() => stage(key, "set")} className={compactButton}>Confirm {labels[key].toLowerCase()}</button>}
           {event.source.page_id > 0 && display(event.source, key) !== display(event.values, key) && <p className="text-sm text-amber-800 dark:text-amber-300">Wikipedia suggestion: {display(event.source, key)}</p>}
           <div onChange={() => stage(key, "set")}>
             {key === "headliners" ? <div className="grid grid-cols-12 gap-3"><TextField name="first" label="First Headliner" columns={6} /><TextField name="second" label="Second Headliner" columns={6} /></div>
@@ -215,11 +226,11 @@ function EditForm({ event, onClose }: { event: UFCEvent; onClose: () => void }) 
   </form.AppForm>;
 }
 
-export function UFCEventEditor({ id, onClose }: { id: string; onClose: () => void }) {
+export function UFCEventEditor({ id, onClose, onOpen }: { id: string; onClose: () => void; onOpen?: (id: string) => void }) {
   const event = useQuery({ ...UFCEventQueryOptions(id), refetchOnWindowFocus: false });
   return <section aria-label="Event editor" className="space-y-3 rounded-lg border border-gray-300 p-4 dark:border-gray-600">
     {event.isPending && <p role="status">Loading event…</p>}
     {event.error && <><p role="alert">Event could not be loaded. {event.error.message}</p><button type="button" onClick={onClose} className={compactButton}>Close Editor</button></>}
-    {event.data && <EditForm key={id} event={event.data} onClose={onClose} />}
+    {event.data && <EditForm key={id} event={event.data} onClose={onClose} onOpen={onOpen ?? (() => undefined)} />}
   </section>;
 }

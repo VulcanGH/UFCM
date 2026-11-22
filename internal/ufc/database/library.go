@@ -318,7 +318,7 @@ func (r *Repository) AdoptLibraryEvents(ctx context.Context, snapshot *catalogue
 				return err
 			}
 		}
-		return nil
+		return reconcileCatalogueReviews(ctx, tx)
 	})
 }
 

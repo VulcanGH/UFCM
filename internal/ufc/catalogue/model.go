@@ -25,22 +25,23 @@ type Facts struct {
 	articleTarget   int64
 	articleFetched  bool
 	forceArticle    bool
-	Reference       string    `json:"reference"`
-	LinkedTitle     string    `json:"linked_title,omitempty"`
-	PageID          int64     `json:"page_id"`
-	ArticleRevision int64     `json:"article_revision"`
-	ListRevision    int64     `json:"list_revision"`
-	RetrievedAt     time.Time `json:"retrieved_at"`
-	Title           string    `json:"title"`
-	Name            string    `json:"name"`
-	Date            *string   `json:"date"`
-	Type            string    `json:"type"`
-	Headliners      []string  `json:"headliners,omitempty"`
-	Status          string    `json:"status"`
-	Aliases         []Alias   `json:"aliases"`
-	Review          []string  `json:"review,omitempty"`
-	OverallSequence string    `json:"overall_sequence,omitempty"`
-	Section         string    `json:"section"`
+	Reference       string              `json:"reference"`
+	LinkedTitle     string              `json:"linked_title,omitempty"`
+	PageID          int64               `json:"page_id"`
+	ArticleRevision int64               `json:"article_revision"`
+	ListRevision    int64               `json:"list_revision"`
+	RetrievedAt     time.Time           `json:"retrieved_at"`
+	Title           string              `json:"title"`
+	Name            string              `json:"name"`
+	Date            *string             `json:"date"`
+	Type            string              `json:"type"`
+	Headliners      []string            `json:"headliners,omitempty"`
+	Status          string              `json:"status"`
+	Aliases         []Alias             `json:"aliases"`
+	Review          []string            `json:"review,omitempty"`
+	ReviewEvidence  map[string][]string `json:"review_evidence,omitempty"`
+	OverallSequence string              `json:"overall_sequence,omitempty"`
+	Section         string              `json:"section"`
 }
 
 // Diagnostic retains an unresolved row without inventing an event identity.

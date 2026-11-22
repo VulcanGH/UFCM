@@ -454,11 +454,13 @@ func enrich(f *Facts, content string) error {
 		if current && len(f.Headliners) == 2 {
 			if m := headlinerPattern.FindStringSubmatch(name); len(m) > 0 && (Normalize(m[1]) != Normalize(f.Headliners[0]) || Normalize(m[2]) != Normalize(f.Headliners[1])) {
 				addReview(f, "article_list_headliner_conflict")
+				addReviewEvidence(f, "article_list_headliner_conflict", strings.Join(f.Headliners, " vs. "), m[1]+" vs. "+m[2])
 			}
 		}
 		addName(f, name, current)
 		if current && beforeType != f.Type {
 			addReview(f, "article_list_type_conflict")
+			addReviewEvidence(f, "article_list_type_conflict", beforeType, f.Type)
 			f.Type = beforeType
 		}
 	}
@@ -471,6 +473,7 @@ func enrich(f *Facts, content string) error {
 		d, e := time.Parse("January 2 2006", m)
 		if e == nil && f.Date != nil && d.Format("2006-01-02") != *f.Date {
 			addReview(f, "article_list_date_conflict")
+			addReviewEvidence(f, "article_list_date_conflict", *f.Date, d.Format("2006-01-02"))
 		}
 	}
 	if (strings.Contains(firstSentence, "took place on") || strings.Contains(firstSentence, "held on")) && !strings.Contains(firstSentence, "scheduled") && !strings.Contains(firstSentence, "planned") {

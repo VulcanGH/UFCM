@@ -155,6 +155,12 @@ func (r *Repository) SaveAcquisition(ctx context.Context, j acquisition.Job) err
 		if n != 1 {
 			return catalogue.ErrRevisionConflict
 		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM ufc_notification_outbox
+			WHERE delivered=FALSE AND (id=$1 OR id=$2) AND id<>$3`,
+			"download-attention:"+j.ID+":missing", "download-attention:"+j.ID+":needs_review",
+			"download-attention:"+j.ID+":"+j.State); err != nil {
+			return err
+		}
 		status := "PENDING"
 		if j.RemoteID != "" {
 			status = "PUSH_APPROVED"

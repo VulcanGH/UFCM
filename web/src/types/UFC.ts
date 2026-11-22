@@ -81,7 +81,7 @@ export interface UFCEvent {
   id: string;
   revision: number;
   values: UFCEventValues;
-  source: UFCEventValues & { page_id: number; list_revision: number; article_revision: number; retrieved_at: string; aliases?: UFCEventAlias[] };
+  source: UFCEventValues & { page_id: number; list_revision: number; article_revision: number; retrieved_at: string; aliases?: UFCEventAlias[]; review_evidence?: Record<string, string[]> };
   corrections: Partial<Record<UFCEditableField, { protected: boolean; value: string | null; names?: string[]; actor: string; at: string }>> & { aliases?: { protected: boolean; values: UFCEventAlias[]; actor: string; at: string } };
   aliases: UFCEventAlias[] | null;
   review: string[] | null;

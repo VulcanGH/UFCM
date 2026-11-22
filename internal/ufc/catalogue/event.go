@@ -22,24 +22,26 @@ type Values struct {
 
 // Correction protects a field, including an explicit unknown value.
 type Correction struct {
-	Protected bool      `json:"protected"`
-	Value     *string   `json:"value"`
-	Names     []string  `json:"names,omitempty"`
-	Actor     string    `json:"actor"`
-	Reason    string    `json:"reason"`
-	At        time.Time `json:"at"`
+	Evidence  map[string]string `json:"review_evidence,omitempty"`
+	Protected bool              `json:"protected"`
+	Value     *string           `json:"value"`
+	Names     []string          `json:"names,omitempty"`
+	Actor     string            `json:"actor"`
+	Reason    string            `json:"reason"`
+	At        time.Time         `json:"at"`
 }
 
 // Corrections is an allowlist of editable fields, without generic metadata properties.
 type Corrections struct {
-	Deleted    bool             `json:"deleted,omitempty"`
-	Deletion   *Correction      `json:"deletion,omitempty"`
-	Name       *Correction      `json:"name,omitempty"`
-	Type       *Correction      `json:"type,omitempty"`
-	Date       *Correction      `json:"date,omitempty"`
-	Headliners *Correction      `json:"headliners,omitempty"`
-	Status     *Correction      `json:"status,omitempty"`
-	Aliases    *AliasCorrection `json:"aliases,omitempty"`
+	AliasDecisions []AliasDecision  `json:"alias_decisions,omitempty"`
+	Deleted        bool             `json:"deleted,omitempty"`
+	Deletion       *Correction      `json:"deletion,omitempty"`
+	Name           *Correction      `json:"name,omitempty"`
+	Type           *Correction      `json:"type,omitempty"`
+	Date           *Correction      `json:"date,omitempty"`
+	Headliners     *Correction      `json:"headliners,omitempty"`
+	Status         *Correction      `json:"status,omitempty"`
+	Aliases        *AliasCorrection `json:"aliases,omitempty"`
 }
 
 // Event retains an immutable local identity and latest source suggestions.
@@ -165,6 +167,7 @@ func Merge(old Event, source Facts) (Event, error) {
 			}
 		}
 	}
+	result.resolveSourceReviews()
 	if len(result.Review) > 0 {
 		for i := range result.Aliases {
 			if !result.Aliases[i].Manual && strings.HasPrefix(result.Aliases[i].Namespace, "ufc.") {
@@ -180,6 +183,7 @@ func Merge(old Event, source Facts) (Event, error) {
 	if c := old.Corrections.Aliases; c != nil && c.Protected {
 		result.Aliases = append([]Alias{}, c.Values...)
 	}
+	result.applyAliasDecisions()
 	if len(result.Aliases) > 96 {
 		return Event{}, errors.New("retained event alias limit exceeded")
 	}

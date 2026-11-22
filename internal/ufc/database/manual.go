@@ -31,6 +31,16 @@ func (r *Repository) CreateCatalogueEvent(ctx context.Context, input catalogue.E
 		if _, err := tx.ExecContext(ctx, "INSERT INTO ufc_event_workspace(event_id) VALUES($1) ON CONFLICT(event_id) DO NOTHING", event.ID); err != nil {
 			return err
 		}
+		if err := reconcileCatalogueReviews(ctx, tx); err != nil {
+			return err
+		}
+		event, err = decodeEvent(tx.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM ufc_events WHERE id=$1", event.ID))
+		if err != nil {
+			return err
+		}
+		if err := loadAliases(ctx, tx, &event); err != nil {
+			return err
+		}
 		return loadComponentPreferences(ctx, tx, &event)
 	})
 	return event, aliasWriteError(err)

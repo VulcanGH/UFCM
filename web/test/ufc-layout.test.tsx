@@ -25,7 +25,7 @@ test("UFC sidebar switches between Events and Settings with existing status", as
   await screen.findByText(/No upcoming events saved/);
   expect(router.state.location.pathname).toBe("/ufc/events");
   const sidebar = screen.getByRole("navigation", { name: "UFC navigation" });
-  expect(within(sidebar).getAllByRole("link").map(link => link.textContent)).toEqual(["Upcoming Events", "Past Events", "Library", "Downloads", "Testing", "Settings"]);
+  expect(within(sidebar).getAllByRole("link").map(link => link.textContent)).toEqual(["Upcoming Events", "Past Events", "Library", "Downloads", "Testing", "Notifications", "Settings"]);
   expect(within(sidebar).getByRole("link", { name: "Upcoming Events" }).getAttribute("aria-current")).toBe("page");
   fireEvent.click(within(sidebar).getByRole("link", { name: "Settings" }));
   await screen.findByText("Application Ready");

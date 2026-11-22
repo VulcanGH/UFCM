@@ -29,19 +29,20 @@ import (
 )
 
 type Server struct {
-	ufcUpdateService     ufcUpdateService
-	ufcAutomationService ufcAutomationService
-	ufcLibraryService    ufcLibraryService
-	ufcProcessingService ufcProcessingService
-	ufcDownloadService   ufcDownloadService
-	ufcSearchService     ufcSearchService
-	catalogueService     catalogueService
-	foundationService    foundationService
-	log                  zerolog.Logger
-	sse                  *sse.Server
-	db                   DatabaseHealth
-	server               *http.Server
-	listener             net.Listener
+	ufcUpdateService       ufcUpdateService
+	ufcAutomationService   ufcAutomationService
+	ufcNotificationService ufcNotificationService
+	ufcLibraryService      ufcLibraryService
+	ufcProcessingService   ufcProcessingService
+	ufcDownloadService     ufcDownloadService
+	ufcSearchService       ufcSearchService
+	catalogueService       catalogueService
+	foundationService      foundationService
+	log                    zerolog.Logger
+	sse                    *sse.Server
+	db                     DatabaseHealth
+	server                 *http.Server
+	listener               net.Listener
 
 	buildInfo      buildInfo
 	config         *config.AppConfig
@@ -86,17 +87,18 @@ type Server struct {
 }
 
 type Deps struct {
-	UFCUpdateService     ufcUpdateService
-	UFCAutomationService ufcAutomationService
-	UFCLibraryService    ufcLibraryService
-	UFCProcessingService ufcProcessingService
-	UFCDownloadService   ufcDownloadService
-	UFCSearchService     ufcSearchService
-	CatalogueService     catalogueService
-	FoundationService    foundationService
-	Log                  zerolog.Logger
-	SSE                  *sse.Server
-	DB                   DatabaseHealth
+	UFCUpdateService       ufcUpdateService
+	UFCAutomationService   ufcAutomationService
+	UFCNotificationService ufcNotificationService
+	UFCLibraryService      ufcLibraryService
+	UFCProcessingService   ufcProcessingService
+	UFCDownloadService     ufcDownloadService
+	UFCSearchService       ufcSearchService
+	CatalogueService       catalogueService
+	FoundationService      foundationService
+	Log                    zerolog.Logger
+	SSE                    *sse.Server
+	DB                     DatabaseHealth
 
 	Config         *config.AppConfig
 	SessionManager *scs.SessionManager
@@ -134,16 +136,17 @@ func NewServer(deps Deps) *Server {
 	sessionManager.Cookie.Secure = false
 
 	srv := &Server{
-		ufcUpdateService:     deps.UFCUpdateService,
-		ufcAutomationService: deps.UFCAutomationService,
-		ufcLibraryService:    deps.UFCLibraryService,
-		ufcProcessingService: deps.UFCProcessingService,
-		ufcDownloadService:   deps.UFCDownloadService,
-		ufcSearchService:     deps.UFCSearchService,
-		catalogueService:     deps.CatalogueService,
-		foundationService:    deps.FoundationService,
-		log:                  deps.Log.With().Str("module", "http").Logger(),
-		config:               deps.Config,
+		ufcUpdateService:       deps.UFCUpdateService,
+		ufcAutomationService:   deps.UFCAutomationService,
+		ufcNotificationService: deps.UFCNotificationService,
+		ufcLibraryService:      deps.UFCLibraryService,
+		ufcProcessingService:   deps.UFCProcessingService,
+		ufcDownloadService:     deps.UFCDownloadService,
+		ufcSearchService:       deps.UFCSearchService,
+		catalogueService:       deps.CatalogueService,
+		foundationService:      deps.FoundationService,
+		log:                    deps.Log.With().Str("module", "http").Logger(),
+		config:                 deps.Config,
 		allowedOrigins: []string{
 			"*",
 			//"http://localhost:3000",

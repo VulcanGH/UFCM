@@ -43,6 +43,8 @@ type catalogueService interface {
 func (s *Server) ufcRoutes(encoder encoder) func(chi.Router) {
 	return func(r chi.Router) {
 		s.ufcUpdateRoutes(r, encoder)
+		s.ufcNotificationRoutes(r, encoder)
+		s.ufcReviewRoutes(r, encoder)
 		s.ufcAutomationRoutes(r, encoder)
 		s.ufcLibraryRoutes(r, encoder)
 		s.ufcProcessingRoutes(r, encoder)
@@ -287,4 +289,58 @@ func catalogueError(encoder encoder, w http.ResponseWriter, err error) {
 	default:
 		encoder.Error(w, err)
 	}
+}
+
+type reviewCatalogueService interface {
+	AliasConflicts(context.Context, string) ([]catalogue.AliasConflict, error)
+	ResolveAliasConflict(context.Context, string, catalogue.ReviewChoice, string) error
+	RecheckAliasConflict(context.Context, string, catalogue.ReviewChoice, string) error
+}
+
+func (s *Server) ufcReviewRoutes(r chi.Router, encoder encoder) {
+	service, ok := s.catalogueService.(reviewCatalogueService)
+	if !ok {
+		return
+	}
+	r.With(requireScope(domain.APIResourceUFC, domain.APIAccessRead)).Get("/events/{id}/review", func(w http.ResponseWriter, r *http.Request) {
+		conflicts, err := service.AliasConflicts(r.Context(), chi.URLParam(r, "id"))
+		if err != nil {
+			catalogueError(encoder, w, err)
+			return
+		}
+		encoder.StatusResponse(w, http.StatusOK, conflicts)
+	})
+	r.With(requireScope(domain.APIResourceUFC, domain.APIAccessWrite)).Post("/events/{id}/review", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			catalogue.ReviewChoice
+			Recheck bool `json:"recheck"`
+		}
+		if err := libraryJSON(w, r, &input); err != nil {
+			encoder.BadRequestErr(w, err)
+			return
+		}
+		caller, ok := callerFromContext(r.Context())
+		if !ok {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		actor := "user:" + caller.Username
+		if caller.APIKey != nil {
+			actor = "api_key:" + strconv.Itoa(caller.APIKey.ID)
+		}
+		id := chi.URLParam(r, "id")
+		var err error
+		if input.Recheck {
+			ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+			defer cancel()
+			err = service.RecheckAliasConflict(ctx, id, input.ReviewChoice, actor)
+		} else {
+			err = service.ResolveAliasConflict(r.Context(), id, input.ReviewChoice, actor)
+		}
+		if err != nil {
+			catalogueError(encoder, w, err)
+			return
+		}
+		encoder.StatusResponse(w, http.StatusOK, map[string]bool{"resolved": true})
+	})
 }

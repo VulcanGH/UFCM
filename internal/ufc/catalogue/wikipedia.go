@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -390,6 +391,9 @@ func (w *Wikipedia) readRows(ctx context.Context, known []Facts, rows []listRow,
 			for _, reason := range old.Review {
 				if reason != "article_enrichment_pending" && reason != "article_enrichment_unavailable" {
 					addReview(&f, reason)
+					if len(f.ReviewEvidence[reason]) == 0 && len(old.ReviewEvidence[reason]) > 0 {
+						addReviewEvidence(&f, reason, old.ReviewEvidence[reason]...)
+					}
 				}
 			}
 		}
@@ -445,4 +449,47 @@ func sameBase(a, b Facts) bool {
 		return a.Date == nil && b.Date == nil
 	}
 	return *a.Date == *b.Date
+}
+
+// ReadReview fetches current list and article evidence before altering any claims.
+func (w *Wikipedia) ReadReview(ctx context.Context, known []Facts, key AliasKey) ([]Facts, error) {
+	parsed, err := w.parse(ctx, w.listRevision, "List of UFC events")
+	if err != nil {
+		return nil, err
+	}
+	rows, err := parseList(parsed.Parse.Text, parsed.Parse.RevID)
+	if err != nil {
+		return nil, err
+	}
+	wanted := map[string]bool{}
+	for _, f := range known {
+		wanted[Normalize(f.Title)] = true
+		if f.LinkedTitle != "" {
+			wanted[Normalize(f.LinkedTitle)] = true
+		}
+	}
+	var selected []listRow
+	for _, row := range rows {
+		if wanted[Normalize(row.Title)] || slices.ContainsFunc(row.Aliases, func(a Alias) bool {
+			return a.Current && KeyForAlias(a) == key
+		}) {
+			selected = append(selected, row)
+		}
+	}
+	if len(selected) == 0 || len(selected) > 32 {
+		return nil, errors.Wrap(ErrInvalidEdit, "the source has no clear evidence for this clash")
+	}
+	snapshot, err := w.readRows(ctx, nil, selected, parsed.Parse.RevID)
+	if err != nil {
+		return nil, err
+	}
+	if len(snapshot.Facts) != len(selected) {
+		return nil, errors.Wrap(ErrInvalidEdit, "the source could not confirm all matching entries")
+	}
+	for _, f := range snapshot.Facts {
+		if slices.Contains(f.Review, "article_enrichment_pending") || slices.Contains(f.Review, "article_enrichment_unavailable") {
+			return nil, errors.Wrap(ErrInvalidEdit, "the source could not confirm all matching articles")
+		}
+	}
+	return snapshot.Facts, nil
 }

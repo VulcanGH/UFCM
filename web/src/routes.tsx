@@ -90,6 +90,12 @@ export const UFCSettingsRoute = createRoute({
   component: lazyRouteComponent(() => import("@screens/UFCSettings"), "UFCSettings"),
 });
 
+export const UFCNotificationsRoute = createRoute({
+  getParentRoute: () => UFCRoute,
+  path: 'notifications',
+  component: lazyRouteComponent(() => import("@screens/UFCNotifications"), "UFCNotifications"),
+});
+
 export const UFCMatchingRoute = createRoute({
   getParentRoute: () => UFCRoute,
   path: 'matching',
@@ -275,6 +281,10 @@ export const SettingsClientsRoute = createRoute({
 export const SettingsNotificationsRoute = createRoute({
   getParentRoute: () => SettingsRoute,
   path: 'notifications',
+  beforeLoad: async ({ context }) => {
+    const config = await context.queryClient.query(ConfigQueryOptions());
+    if (config.product_slug === "ufc-manager") throw redirect({ to: "/ufc/notifications", replace: true });
+  },
   loader: (opts) => opts.context.queryClient.query({ ...NotificationsQueryOptions(), staleTime: "static" }),
   component: lazyRouteComponent(() => import("@screens/settings/Notifications"))
 });
@@ -528,7 +538,7 @@ export const RootRoute = createRootRouteWithContext<{
 
 const filterRouteTree = FiltersRoute.addChildren([FilterIndexRoute, FilterGetByIdRoute.addChildren([FilterGeneralRoute, FilterMoviesTvRoute, FilterMusicRoute, FilterBooksRoute, FilterAdvancedRoute, FilterExternalRoute, FilterActionsRoute, FilterNotificationsRoute])])
 const settingsRouteTree = SettingsRoute.addChildren([SettingsIndexRoute, SettingsLogRoute, SettingsIndexersRoute, SettingsIrcRoute, SettingsMatrixRoute, SettingsListsRoute, SettingsFeedsRoute, SettingsClientsRoute, SettingsNotificationsRoute, SettingsApiRoute, SettingsProxiesRoute, SettingsReleasesRoute, SettingsAccountRoute]);
-const ufcRouteTree = UFCRoute.addChildren([UFCIndexRoute, UFCEventsRoute, UFCPastEventsRoute, UFCManagerRoute, UFCSettingsRoute, UFCMatchingRoute, UFCDownloadsRoute, UFCLibraryRoute]);
+const ufcRouteTree = UFCRoute.addChildren([UFCIndexRoute, UFCEventsRoute, UFCPastEventsRoute, UFCManagerRoute, UFCSettingsRoute, UFCNotificationsRoute, UFCMatchingRoute, UFCDownloadsRoute, UFCLibraryRoute]);
 const authenticatedTree = AuthRoute.addChildren([AuthIndexRoute.addChildren([DashboardRoute, ufcRouteTree, filterRouteTree, ReleasesRoute, settingsRouteTree, LogsRoute, NotificationInboxRoute])])
 const routeTree = RootRoute.addChildren([
   authenticatedTree,

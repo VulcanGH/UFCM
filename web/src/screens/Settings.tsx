@@ -18,10 +18,12 @@ import {
   UserCircleIcon
 } from "@heroicons/react/24/outline";
 import { Link, Outlet } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 
 import { classNames } from "@utils";
 import { AuthContext } from "@utils/Context";
+import { ConfigQueryOptions } from "@api/queries";
 
 interface NavTabType {
   labelKey: string;
@@ -108,9 +110,11 @@ function SidebarNav({ subNavigation }: SidebarNavProps) {
 export function Settings() {
   const { t } = useTranslation("settings");
   const auth = AuthContext.get();
-  const visibleNavigation = auth.capabilities?.account_management
-    ? subNavigation
-    : subNavigation.filter((item) => item.href !== "/settings/account");
+  const { data: config } = useQuery(ConfigQueryOptions());
+  const visibleNavigation = subNavigation.filter(item =>
+    (item.href !== "/settings/account" || auth.capabilities?.account_management) &&
+    (item.href !== "/settings/notifications" || config?.product_slug !== "ufc-manager")
+  );
 
   return (
     <main>

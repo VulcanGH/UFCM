@@ -97,6 +97,7 @@ func ApplyEdit(old Event, edit EventEdit, actor string, at time.Time) (Event, er
 		}
 		if f.Operation == "set" {
 			*field.correction = &Correction{Protected: true, Value: f.Value, Names: append([]string(nil), f.Names...), Actor: actor, At: at.UTC()}
+			(*field.correction).Evidence = sourceReviewEvidence(old, field.key)
 		} else {
 			*field.correction = nil
 		}
@@ -145,6 +146,7 @@ func ApplyEdit(old Event, edit EventEdit, actor string, at time.Time) (Event, er
 				return Event{}, err
 			}
 			result.Aliases = aliases
+			result.retainUnchangedDecisions(old)
 			result.Corrections.Aliases = &AliasCorrection{Protected: true, Values: aliases, Actor: actor, At: at.UTC()}
 		case "reset":
 			if old.Source.PageID == 0 || a.Values != nil {
@@ -152,6 +154,7 @@ func ApplyEdit(old Event, edit EventEdit, actor string, at time.Time) (Event, er
 			}
 			result.Aliases = append([]Alias{}, old.Source.Aliases...)
 			result.Corrections.Aliases = nil
+			result.Corrections.AliasDecisions = nil
 		default:
 			return Event{}, errors.Wrap(ErrInvalidEdit, "invalid alias operation")
 		}
@@ -159,6 +162,7 @@ func ApplyEdit(old Event, edit EventEdit, actor string, at time.Time) (Event, er
 	if err := validateValues(result.Values); err != nil {
 		return Event{}, errors.Wrap(ErrInvalidEdit, "%s", err.Error())
 	}
+	result.resolveSourceReviews()
 	return result, nil
 }
 

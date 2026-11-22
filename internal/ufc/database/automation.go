@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/autobrr/autobrr/internal/ufc/acquisition"
@@ -313,8 +314,12 @@ func (r *Repository) FinishAutomationItem(ctx context.Context, id, state, messag
 }
 
 func queueUFCNotice(ctx context.Context, tx *sql.Tx, id, event, title, message string) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := tx.ExecContext(ctx, `INSERT INTO ufc_notification_outbox(id,event,title,message,next_due,created_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT DO NOTHING`, id, event, title, message, now)
+	now := time.Now().UTC()
+	due := now
+	if strings.HasPrefix(id, "download-attention:") && strings.HasSuffix(id, ":missing") {
+		due = now.Add(2 * time.Minute)
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO ufc_notification_outbox(id,event,title,message,next_due,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, id, event, title, message, due.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	return err
 }
 
@@ -353,8 +358,22 @@ func archiveCompletedEvent(ctx context.Context, tx *sql.Tx, id string) error {
 }
 
 // AutomationNotices reads notification work separately from acquisition work.
+const obsoleteNoticeSQL = `
+		CASE WHEN id LIKE 'download-attention:%' THEN NOT EXISTS (
+			SELECT 1 FROM ufc_acquisitions a WHERE a.dismissed=FALSE
+			AND n.id='download-attention:' || a.id || ':' || a.state)
+		WHEN id LIKE 'UFC_ATTENTION:%' THEN NOT EXISTS (
+			SELECT 1 FROM ufc_processing_jobs j WHERE
+			(j.state='needs_review' AND n.id='UFC_ATTENTION:' || j.id || ':Library copy needs review; see UFC Downloads')
+			OR (j.cleanup_state='needs_review' AND n.id='UFC_ATTENTION:' || j.id || ':Source cleanup needs review; Library copies are retained'))
+		WHEN id LIKE 'update-attention:%' THEN NOT EXISTS (
+			SELECT 1 FROM ufc_update_state u WHERE u.phase IN ('failed','deferred')
+			AND n.id='update-attention:' || u.release_id || ':' || u.phase)
+		ELSE FALSE END`
+
 func (r *Repository) AutomationNotices(ctx context.Context, now time.Time) ([]automation.Notice, error) {
-	rows, err := r.db.QueryContext(ctx, "SELECT id,event,title,message,attempts FROM ufc_notification_outbox WHERE delivered=FALSE AND next_due<=$1 ORDER BY created_at,id LIMIT 20", now.UTC().Format(time.RFC3339Nano))
+	rows, err := r.db.QueryContext(ctx, "SELECT id,event,title,message,attempts,"+obsoleteNoticeSQL+
+		" FROM ufc_notification_outbox n WHERE delivered=FALSE AND next_due<=$1 ORDER BY created_at,id LIMIT 20", now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
 	}
@@ -362,12 +381,21 @@ func (r *Repository) AutomationNotices(ctx context.Context, now time.Time) ([]au
 	result := []automation.Notice{}
 	for rows.Next() {
 		var n automation.Notice
-		if err := rows.Scan(&n.ID, &n.Event, &n.Title, &n.Message, &n.Attempts); err != nil {
+		if err := rows.Scan(&n.ID, &n.Event, &n.Title, &n.Message, &n.Attempts, &n.Obsolete); err != nil {
 			return nil, err
 		}
 		result = append(result, n)
 	}
 	return result, rows.Err()
+}
+
+func (r *Repository) NoticeObsolete(ctx context.Context, id string) (bool, error) {
+	var obsolete bool
+	err := r.db.QueryRowContext(ctx, "SELECT "+obsoleteNoticeSQL+" FROM ufc_notification_outbox n WHERE id=$1", id).Scan(&obsolete)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	return obsolete, err
 }
 
 // FinishAutomationNotice retries delivery only, never downloading or copying again.

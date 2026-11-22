@@ -106,6 +106,9 @@ func (r *Repository) EditCatalogueEvent(ctx context.Context, id string, edit cat
 		if err := saveEvent(ctx, tx, event, edit.Revision); err != nil {
 			return err
 		}
+		if err := reconcileCatalogueReviews(ctx, tx); err != nil {
+			return err
+		}
 		if q := edit.Quality; q != nil {
 			if q.Mode == "inherit" {
 				_, err = tx.ExecContext(ctx, "DELETE FROM ufc_event_quality_overrides WHERE event_id=$1", id)
@@ -130,7 +133,13 @@ func (r *Repository) EditCatalogueEvent(ctx context.Context, id string, edit cat
 				return err
 			}
 		}
-		event.Revision++
+		event, err = decodeEvent(tx.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM ufc_events WHERE id=$1", id))
+		if err != nil {
+			return err
+		}
+		if err := loadAliases(ctx, tx, &event); err != nil {
+			return err
+		}
 		return loadComponentPreferences(ctx, tx, &event)
 	})
 	if err != nil && (strings.Contains(err.Error(), "database is locked") || strings.Contains(err.Error(), "SQLITE_BUSY")) {
@@ -303,6 +312,9 @@ func (r *Repository) ApplyCatalogue(ctx context.Context, snapshot *catalogue.Sna
 				report.NeedsReview++
 			}
 		}
+		if err := reconcileCatalogueReviews(ctx, tx); err != nil {
+			return err
+		}
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM ufc_events WHERE review_json <> '[]' AND review_json <> 'null' AND manual_corrections_json NOT LIKE '%\"deleted\":true%'").Scan(&report.NeedsReview); err != nil {
 			return err
 		}
@@ -347,47 +359,12 @@ func appendReview(reasons []string, reason string) []string {
 }
 
 func reviewIdentifierOwners(ctx context.Context, tx *sql.Tx, id string, alias catalogue.Alias) (bool, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT event_id FROM ufc_event_aliases WHERE namespace=$1 AND normalized_value=$2 AND is_current=TRUE AND event_id<>$3", alias.Namespace, catalogue.Normalize(alias.Value), id)
-	if err != nil {
-		return false, err
-	}
-	owners := []string{}
-	for rows.Next() {
-		var owner string
-		if err := rows.Scan(&owner); err != nil {
-			rows.Close()
-			return false, err
-		}
-		owners = append(owners, owner)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return false, err
-	}
-	if err := rows.Close(); err != nil {
-		return false, err
-	}
-	for _, owner := range owners {
-		event, err := decodeEvent(tx.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM ufc_events WHERE id=$1", owner))
-		if err != nil {
-			return false, err
-		}
-		if err := loadAliases(ctx, tx, &event); err != nil {
-			return false, err
-		}
-		event.Review = appendReview(event.Review, "identifier_owned_by_existing_event")
-		for i, a := range event.Aliases {
-			if !a.Manual && a.Namespace == alias.Namespace && catalogue.Normalize(a.Value) == catalogue.Normalize(alias.Value) {
-				event.Aliases[i].Verified = false
-			}
-		}
-		if err := saveEvent(ctx, tx, event, event.Revision); err != nil {
-			return false, err
-		}
-	}
-	return len(owners) > 0, nil
+	var conflict bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+        SELECT 1 FROM ufc_event_aliases WHERE namespace=$1 AND normalized_value=$2 AND is_current=TRUE AND verified=TRUE AND event_id<>$3
+    )`, alias.Namespace, catalogue.Normalize(alias.Value), id).Scan(&conflict)
+	return conflict, err
 }
-
 func saveEvent(ctx context.Context, tx *sql.Tx, event catalogue.Event, expected int64) error {
 	values := []string{}
 	for _, v := range []any{event.Values.Headliners, event.Source, event.Corrections, event.Review} {

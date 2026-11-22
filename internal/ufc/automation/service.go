@@ -229,6 +229,31 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		return err
 	}
 	for _, notice := range notices {
+		if !notice.Obsolete && notice.Event == string(domain.NotificationEventUFCAttention) {
+			if checker, ok := s.repo.(interface {
+				NoticeObsolete(context.Context, string) (bool, error)
+			}); ok {
+				notice.Obsolete, err = checker.NoticeObsolete(ctx, notice.ID)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if notice.Obsolete || notice.Attempts >= 5 {
+			reason := "Retry limit reached"
+			if notice.Obsolete {
+				reason = "Issue no longer needs attention"
+			}
+			if recorder, ok := s.notifications.(interface {
+				Skip(context.Context, domain.NotificationEvent, string)
+			}); ok {
+				recorder.Skip(ctx, domain.NotificationEvent(notice.Event), reason)
+			}
+			if err := s.repo.FinishAutomationNotice(ctx, notice.ID, true, now); err != nil {
+				return err
+			}
+			continue
+		}
 		deliveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		payload := domain.NotificationPayload{Event: domain.NotificationEvent(notice.Event), Subject: "UFC Manager", Message: notice.Message, ReleaseName: notice.Title, Timestamp: now, Sender: "UFC Manager"}
 		var deliveryErr error

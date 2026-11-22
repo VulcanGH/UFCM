@@ -60,9 +60,10 @@ type eventBus interface {
 }
 
 type Service struct {
-	log      zerolog.Logger
-	eventBus eventBus
-	sse      ssePublisher
+	builtinOnly bool
+	log         zerolog.Logger
+	eventBus    eventBus
+	sse         ssePublisher
 
 	stateMu sync.Mutex
 	state   atomic.Pointer[routingSnapshot]
@@ -71,6 +72,10 @@ type Service struct {
 	inboxRepo inboxRepo
 	scheduler schedulerService
 }
+
+// UseBuiltinOnly retains the inbox while UFC Manager owns outbound delivery.
+// Call before Start.
+func (s *Service) UseBuiltinOnly() { s.builtinOnly = true }
 
 type eventSet map[domain.NotificationEvent]struct{}
 
@@ -671,6 +676,9 @@ func (s webhookCredentialSender) Send(ctx context.Context, payload domain.Notifi
 }
 
 func (s *Service) newSender(notification *domain.Notification) (sender Sender) {
+	if s.builtinOnly && notification.Type != domain.NotificationTypeBuiltin {
+		return nil
+	}
 	defer func() {
 		if sender != nil && notification.Webhook != "" {
 			sender = webhookCredentialSender{Sender: sender, endpoint: notification.Webhook}

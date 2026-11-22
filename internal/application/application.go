@@ -41,6 +41,7 @@ import (
 	ufcdatabase "github.com/autobrr/autobrr/internal/ufc/database"
 	"github.com/autobrr/autobrr/internal/ufc/foundation"
 	"github.com/autobrr/autobrr/internal/ufc/library"
+	"github.com/autobrr/autobrr/internal/ufc/notifications"
 	"github.com/autobrr/autobrr/internal/ufc/processing"
 	ufcsearch "github.com/autobrr/autobrr/internal/ufc/search"
 	"github.com/autobrr/autobrr/internal/ufc/updater"
@@ -625,10 +626,23 @@ func (app *App) setup(ctx context.Context) error {
 		app.processingService = processing.New(ufcdatabase.New(db.Handler, db.Driver, app.log), app.downloaderService)
 		app.acquisitionService.SetCompletionHandoff(app.processingService)
 		httpDeps.UFCProcessingService = app.processingService
-		app.automationService = automation.New(ufcdatabase.New(db.Handler, db.Driver, app.log), app.catalogueService, searchService, app.acquisitionService, app.notificationService, app.log)
+		repo := ufcdatabase.New(db.Handler, db.Driver, app.log)
+		if err := repo.ReconcileCatalogueReviews(ctx); err != nil {
+			return err
+		}
+		legacy, err := notificationRepo.List(ctx)
+		if err != nil {
+			return err
+		}
+		delivery, err := notifications.New(ctx, repo, legacy, app.log)
+		if err != nil {
+			return err
+		}
+		app.notificationService.UseBuiltinOnly()
+		httpDeps.UFCNotificationService = delivery
+		app.automationService = automation.New(repo, app.catalogueService, searchService, app.acquisitionService, delivery, app.log)
 		app.feedService.SetPageObserver(app.automationService.ObserveFeed)
 		httpDeps.UFCAutomationService = app.automationService
-		repo := ufcdatabase.New(db.Handler, db.Driver, app.log)
 		app.ufcUpdateService = updater.New(repo, meta.GetVersion(), db.Driver, db.DSN, app.cfg.Config.ConfigPath, func(ctx context.Context, root string) error {
 			if err := updater.SafeDirectory(root); err != nil {
 				return err

@@ -28,6 +28,7 @@ type Item struct {
 type Notice struct {
 	ID, Event, Title, Message string
 	Attempts                  int
+	Obsolete                  bool
 }
 
 // Deadline allows 48 hours after the end of a date-only event day.

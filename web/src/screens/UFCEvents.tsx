@@ -40,7 +40,7 @@ function EventGroup({ title, events, empty, onEdit, onSearch }: { title: string;
                   <h4 className="font-medium leading-6">{event.source_url ? <a href={event.source_url} target="_blank" rel="noreferrer" title="Open Wikipedia Source" className="hover:underline focus-visible:underline">{event.name}</a> : <span>{event.name}</span>}</h4>
                   {!event.source_url && <span className="text-xs text-gray-500 dark:text-gray-400">Local</span>}
                   <span className="inline-flex items-center self-center text-xs leading-4 text-gray-500 dark:text-gray-400">({event.date ? <time dateTime={event.date}>{event.date}</time> : "Date to be announced"})</span>
-                  {event.needs_review && <span title={(event.review ?? []).join(", ").replaceAll("_", " ")} className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-900 dark:text-amber-100">Needs Review</span>}
+                  {event.needs_review && <button type="button" onClick={() => onEdit(event.id)} aria-label={`Review ${event.name}`} title={(event.review ?? []).join(", ").replaceAll("_", " ")} className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-900 dark:text-amber-100">Needs Review</button>}
                 </div>
                 <p className="text-xs leading-tight text-gray-500 dark:text-gray-400">Aliases: {aliases.length ? aliases.join(" · ") : "None recorded"}</p>
                 <div className="pt-2"><UFCCoverage id={event.id} /></div>
@@ -155,7 +155,7 @@ export function UFCEvents({ past = false }: { past?: boolean } = {}) {
           {refresh.error && <p role="alert">Refresh could not be started. {refresh.error.message}</p>}
           {status.data?.last_error && !running && <p role="alert">Refresh failed. Saved events remain available. {status.data.last_error}</p>}
           {status.data?.interrupted && !running && <p role="status">The previous refresh was interrupted. Use Refresh to try again.</p>}
-          {editingID && <UFCEventEditor key={editingID} id={editingID} onClose={() => setEditingID(undefined)} />}
+          {editingID && <UFCEventEditor key={editingID} id={editingID} onClose={() => setEditingID(undefined)} onOpen={setEditingID} />}
           {searchID && <UFCEventSearch key={searchID} id={searchID} onClose={() => setSearchID(undefined)} />}
           {creating && <UFCNewEvent onCreated={event => { setCreating(false); setEditingID(event.id); }} onCancel={() => setCreating(false)} />}
           {showAll && <>

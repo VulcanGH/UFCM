@@ -14,6 +14,7 @@ const navigation = [
   { label: "Library", to: "/ufc/library", icon: RectangleStackIcon },
   { label: "Downloads", to: "/ufc/downloads", icon: RectangleStackIcon },
   { label: "Testing", to: "/ufc/matching", icon: RectangleStackIcon },
+  { label: "Notifications", to: "/ufc/notifications", icon: RectangleStackIcon },
   { label: "Settings", to: "/ufc/settings", icon: Square3Stack3DIcon }
 ] as const;
 
