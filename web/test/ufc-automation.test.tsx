@@ -21,7 +21,7 @@ test("saves directly and labels the saved enabled and disabled states", async ()
 });
 
 test("processing toggle preserves draft configuration and saves only its own flag",async()=>{
- let current:ProcessingSettings={revision:1,source_roots:["X:/downloads"],destination_root:"X:/library",event_folder_template:"event-template",main_file_template:"main",extra_file_template:"extra",component_folder:"Featurettes",conflict_policy:"review",extensions:[".mkv"],max_concurrent:1,max_attempts:3,sab_client_id:1,sab_category:"ufc",auto_process_completed:false,cleanup_sab_download:false};
+ let current:ProcessingSettings={revision:1,source_roots:["X:/downloads"],destination_root:"X:/library",event_folder_template:"event-template",main_file_template:"main",extra_file_template:"extra",component_folder:"Featurettes",conflict_policy:"review",extensions:[".mkv"],max_concurrent:1,max_attempts:3,sab_client_id:1,sab_category:"ufc",auto_process_completed:false,cleanup_sab_download:false,plex_placeholder:false};
  vi.spyOn(APIClient.ufc,"processingSettings").mockImplementation(async()=>current);
  vi.spyOn(APIClient.ufc,"downloadClients").mockResolvedValue([{id:1,name:"Fixture SAB"}]);
  vi.spyOn(APIClient.ufc,"librarySettings").mockResolvedValue({revision:1,running:false,run_id:"",last_scan:null,message:"",roots:[{id:"root",path:"X:/library",enabled:true,state:"available",message:""}]});

@@ -19,6 +19,8 @@ import (
 )
 
 type repository interface {
+	PendingPlaceholders(context.Context, time.Time) ([]PlaceholderTask, error)
+	FinishPlaceholder(context.Context, PlaceholderTask, time.Time) error
 	Acquisition(context.Context, string) (acquisition.Job, error)
 	PendingProcessingHandoffs(context.Context) ([]acquisition.Job, error)
 	FinishProcessingHandoff(context.Context, string) (bool, error)

@@ -17,6 +17,7 @@ import (
 
 	"github.com/autobrr/autobrr/internal/maintenance"
 	"github.com/autobrr/autobrr/internal/ufc/catalogue"
+	"github.com/autobrr/autobrr/internal/ufc/plexplaceholder"
 	"github.com/autobrr/autobrr/internal/ufc/matching"
 	"github.com/autobrr/autobrr/pkg/errors"
 )
@@ -272,6 +273,9 @@ func walkFiles(ctx context.Context, root Root, filesystem fs.FS, limit int) ([]F
 			return nil
 		}
 		if !info.Mode().IsRegular() {
+			return nil
+		}
+		if plexplaceholder.IsName(entry.Name()) {
 			return nil
 		}
 		ext := strings.ToLower(path.Ext(name))

@@ -31,6 +31,7 @@ type Settings struct {
 	SABCategory          string   `json:"sab_category"`
 	AutoProcessCompleted bool     `json:"auto_process_completed"`
 	CleanupSABDownload   bool     `json:"cleanup_sab_download"`
+	PlexPlaceholder      bool     `json:"plex_placeholder"`
 }
 
 func cleanRoot(value string) (string, error) {

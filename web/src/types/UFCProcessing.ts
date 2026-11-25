@@ -16,6 +16,7 @@ export interface UFCProcessingSettings {
   sab_category: string;
   auto_process_completed: boolean;
   cleanup_sab_download: boolean;
+  plex_placeholder: boolean;
 }
 
 export interface UFCProcessingPreview {

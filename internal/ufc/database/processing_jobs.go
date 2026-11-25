@@ -358,7 +358,7 @@ func (r *Repository) CompleteProcessingJob(ctx context.Context, job processing.J
 				return sql.ErrNoRows
 			}
 		}
-		result, err = tx.ExecContext(ctx, `UPDATE ufc_processing_files SET state='verified',source_sha256=$1,destination_sha256=$1 WHERE job_id=$2 AND source_path=$3 AND state='published'`, hash, job.ID, file.Source)
+		result, err = tx.ExecContext(ctx, `UPDATE ufc_processing_files SET state='verified',source_sha256=$1,destination_sha256=$1,placeholder_due=$4 WHERE job_id=$2 AND source_path=$3 AND state='published'`, hash, job.ID, file.Source, time.Now().UTC().Format(placeholderTimeFormat))
 		if err != nil {
 			return err
 		}

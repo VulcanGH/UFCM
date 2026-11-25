@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/autobrr/autobrr/internal/ufc/catalogue"
+	"github.com/autobrr/autobrr/internal/ufc/plexplaceholder"
 	"github.com/autobrr/autobrr/internal/ufc/matching"
 	"github.com/autobrr/autobrr/pkg/errors"
 )
@@ -151,7 +152,7 @@ func sourceFiles(ctx context.Context, storage, resolvedRoot string, extensions [
 	files := []FilePlan{}
 	count := 0
 	add := func(path string, info fs.FileInfo) error {
-		if !info.Mode().IsRegular() || !allowed[strings.ToLower(filepath.Ext(path))] {
+		if !info.Mode().IsRegular() || !allowed[strings.ToLower(filepath.Ext(path))] || plexplaceholder.IsName(filepath.Base(path)) {
 			return nil
 		}
 		if len(files) >= 64 {
@@ -425,6 +426,9 @@ func (s *Service) Preview(ctx context.Context, id string) (*Preview, error) {
 			name += " - Part " + strconv.Itoa(componentParts[file.Component])
 		}
 		file.Destination = filepath.ToSlash(filepath.Join(rel, name+filepath.Ext(file.Source)))
+		if plexplaceholder.IsName(filepath.Base(file.Destination)) {
+			file.Reasons = append(file.Reasons, "Proposed filename is reserved for Plex placeholders")
+		}
 		if state := destinationState(settings.DestinationRoot, file.Destination); state != "planned" {
 			file.Reasons = append(file.Reasons, "Destination exists or contains an unsafe path; content is not verified")
 		}

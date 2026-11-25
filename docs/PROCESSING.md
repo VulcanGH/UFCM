@@ -50,6 +50,8 @@ Use restricted Go templates with allowlisted data/functions, not arbitrary code.
 
 The [synthetic fixture set](fixtures/processing_naming.json) records numbered, Fight Night, ESPN, ABC, Freedom, rematch, extension-case and main/Featurettes layouts. It also identifies missing-year, ambiguous, multi-file, conflict and partial-copy corrections. The reference script's parser, state JSON, automatic suffixes, folder rename and copy retry loop are not compatibility requirements. Keep its successful folder layout as the default while using canonical event identity and verified per-file evidence. Never copy the original script, local paths, state data or webhook into fixtures.
 
+With **Show events with only extras in Plex** enabled, a verified extras import can publish the bundled placeholder video in an event folder without playable top-level media. UFCM skips the reserved placeholder filename when scanning and importing media. Once the main card is verified and recorded, UFCM can remove only the placeholder backed by its own matching hidden hard link and bundled video content. This is the sole exception for UFCM-created Plex placeholders to the library removal policy. Pending placeholder work is retried independently of the import. Disabling the setting stops creation while allowing owned placeholders to be retired when a main card is imported.
+
 ## Conflict policies
 
 Identical content is established by verification, not same filename or size. It can be reconciled as existing coverage without copying. Different content follows the selected policy:

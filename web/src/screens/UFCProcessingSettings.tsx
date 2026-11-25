@@ -35,6 +35,7 @@ function Form({ settings }: { settings: Settings }) {
       <label className="text-sm font-medium">Completed download folders (one absolute path per line)<textarea rows={1} value={sources} onChange={event => { setSources(event.target.value); save.reset(); }} className={inputClass} /></label>
       <label className="text-sm font-medium">Library destination<select value={draft.destination_root} onChange={event => set("destination_root", event.target.value)} className={inputClass}><option value="">Select a configured library folder</option>{roots.map(root => <option key={root.id} value={root.path}>{root.path}</option>)}</select></label>
     </div>
+    <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={draft.plex_placeholder ?? false} onChange={event => set("plex_placeholder", event.target.checked)} /> Show events with only extras in Plex</label>
     {library.error && <p role="alert">Could not load library folders. {library.error.message}</p>}
     <div className="grid gap-4 md:grid-cols-2">
       <label className="text-sm font-medium">Event folder template<input value={draft.event_folder_template} onChange={event => set("event_folder_template", event.target.value)} className={inputClass} /></label>

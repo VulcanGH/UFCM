@@ -138,6 +138,11 @@ func (s *Service) Start(ctx context.Context) error {
 		defer workers.Done()
 		s.reconcileHandoffs(workerCtx)
 	}()
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		s.reconcilePlaceholders(workerCtx)
+	}()
 	for range settings.MaxConcurrent {
 		workers.Add(1)
 		go func() {

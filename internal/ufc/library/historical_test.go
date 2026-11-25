@@ -69,6 +69,7 @@ func TestUnreadableFolderAndUnknownTitleDoNotStopLaterMatches(t *testing.T) {
 		"a-unknown/unknown - Prelims.1080p.mkv":  {Data: []byte("fixture")},
 		"b-unreadable/private.mkv":               {Data: []byte("fixture")},
 		"c-later/UFC 1 The Beginning (1993).mp4": {Data: []byte("fixture")},
+		"c-later/UFC 1 The Beginning (1993) - UFCM Placeholder.MKV": {Data: []byte("fixture")},
 	}}
 	files, complete := walkFiles(t.Context(), Root{ID: "fixture", Path: "archive"}, filesystem, 100)
 	require.False(t, complete, "an unreadable location must prevent missing-file inference")
