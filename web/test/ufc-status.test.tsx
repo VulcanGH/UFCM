@@ -9,7 +9,7 @@ test("shows disabled capabilities without acquisition controls", () => {
   expect(screen.getByRole("group", {name: "Automation Settings"})).toBeTruthy();
   expect(screen.getAllByText("Disabled")).toHaveLength(1);
   expect(screen.getAllByText("Unavailable")).toHaveLength(3);
-  expect(screen.getAllByRole("term").map(term => term.textContent)).toEqual(["Automatic Downloads", "Automatic Processing", "Automatic Download Removal", "Automatically dummy file"]);
+  expect(screen.getAllByRole("term").map(term => term.textContent)).toEqual(["Automatic Downloads", "Automatic Processing", "Automatic Download Removal", "Automatic Dummy File"]);
   expect(screen.queryByRole("button")).toBeNull();
 });
 

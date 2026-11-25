@@ -40,7 +40,7 @@ export function UFCStatusPanel({ status, pending, error, autoCopyEnabled, automa
               <dd>{processingControl ?? (autoCopyEnabled === undefined ? "Unavailable" : autoCopyEnabled ? "Enabled" : "Disabled")}</dd>
             </div>
             <div className="flex justify-between gap-4 p-3"><dt>Automatic Download Removal</dt><dd>{removalControl ?? "Unavailable"}</dd></div>
-            <div className="flex justify-between gap-4 p-3"><dt>Automatically dummy file</dt><dd>{placeholderControl ?? "Unavailable"}</dd></div>
+            <div className="flex justify-between gap-4 p-3"><dt>Automatic Dummy File</dt><dd>{placeholderControl ?? "Unavailable"}</dd></div>
           </dl>
         </>
       )}
