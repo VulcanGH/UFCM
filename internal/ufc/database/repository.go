@@ -87,6 +87,7 @@ func (r *Repository) migrator() *migrator.Migrator {
 	m.AddFileMigration("17_automatic_acquisition.sql")
 	m.AddFileMigration("18_application_updates.sql")
 	m.AddFileMigration("19_notification_settings.sql")
+	m.AddFileMigration("20_plex_placeholder.sql")
 	return m
 }
 
