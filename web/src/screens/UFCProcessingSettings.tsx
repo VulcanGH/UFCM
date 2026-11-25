@@ -8,7 +8,7 @@ import { UFCActionButton } from "./UFCActionButton";
 
 const inputClass = "mt-1 block w-full rounded-md border-gray-300 bg-gray-100 text-sm dark:border-gray-700 dark:bg-gray-815";
 
-const configuration = (settings: Settings) => JSON.stringify({ ...settings, revision: 0, auto_process_completed: false, cleanup_sab_download: false });
+const configuration = (settings: Settings) => JSON.stringify({ ...settings, revision: 0, auto_process_completed: false, cleanup_sab_download: false, plex_placeholder: false });
 
 function Form({ settings }: { settings: Settings }) {
   const client = useQueryClient();
@@ -23,7 +23,7 @@ function Form({ settings }: { settings: Settings }) {
   const categories = useQuery({ queryKey: ["ufc", "sab-categories", draft.sab_client_id], queryFn: () => APIClient.ufc.sabCategories(draft.sab_client_id), enabled: draft.sab_client_id > 0, retry: false });
   const save = useMutation({
     mutationKey: ["ufc", "processing-settings"],
-    mutationFn: () => APIClient.ufc.saveProcessingSettings({ ...draft, revision: configuration(base) === configuration(settings) ? settings.revision : draft.revision, auto_process_completed: settings.auto_process_completed, cleanup_sab_download: settings.cleanup_sab_download, source_roots: sources.split("\n").map(value => value.trim()).filter(Boolean), extensions: extensions.split(",").map(value => value.trim()).filter(Boolean) }),
+    mutationFn: () => APIClient.ufc.saveProcessingSettings({ ...draft, revision: configuration(base) === configuration(settings) ? settings.revision : draft.revision, auto_process_completed: settings.auto_process_completed, cleanup_sab_download: settings.cleanup_sab_download, plex_placeholder: settings.plex_placeholder, source_roots: sources.split("\n").map(value => value.trim()).filter(Boolean), extensions: extensions.split(",").map(value => value.trim()).filter(Boolean) }),
     onSuccess: saved => { setBase(saved); setDraft(saved); setSources(saved.source_roots.join("\n")); setExtensions(saved.extensions.join(", ")); setConflict(false); setLatest(undefined); void client.invalidateQueries({ queryKey: ["ufc", "processing-settings"] }); },
     onError: error => { if ("status" in error && error.status === 409) setConflict(true); }
   });
@@ -32,10 +32,9 @@ function Form({ settings }: { settings: Settings }) {
   return <form aria-label="Processing Settings" className="space-y-4" onSubmit={event => { event.preventDefault(); if (!conflict) save.mutate(); }}>
     <p className="text-sm text-gray-500 dark:text-gray-400">Configure copy-only processing. Existing library folders are never renamed or replaced.</p>
     <div className="grid gap-4 md:grid-cols-2">
-      <label className="text-sm font-medium">Completed download folders (one absolute path per line)<textarea rows={1} value={sources} onChange={event => { setSources(event.target.value); save.reset(); }} className={inputClass} /></label>
+      <label className="text-sm font-medium">Completed download folders<textarea rows={1} value={sources} onChange={event => { setSources(event.target.value); save.reset(); }} className={inputClass} /></label>
       <label className="text-sm font-medium">Library destination<select value={draft.destination_root} onChange={event => set("destination_root", event.target.value)} className={inputClass}><option value="">Select a configured library folder</option>{roots.map(root => <option key={root.id} value={root.path}>{root.path}</option>)}</select></label>
     </div>
-    <label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={draft.plex_placeholder ?? false} onChange={event => set("plex_placeholder", event.target.checked)} /> Show events with only extras in Plex</label>
     {library.error && <p role="alert">Could not load library folders. {library.error.message}</p>}
     <div className="grid gap-4 md:grid-cols-2">
       <label className="text-sm font-medium">Event folder template<input value={draft.event_folder_template} onChange={event => set("event_folder_template", event.target.value)} className={inputClass} /></label>

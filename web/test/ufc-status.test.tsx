@@ -8,7 +8,8 @@ test("shows disabled capabilities without acquisition controls", () => {
   render(<UFCStatusPanel pending={false} status={{product_slug: "ufc-manager", product_name: "UFC Manager", schema_ready: true, settings_revision: 1, automatic_acquisition_enabled: false, processing_enabled: false}} />);
   expect(screen.getByRole("group", {name: "Automation Settings"})).toBeTruthy();
   expect(screen.getAllByText("Disabled")).toHaveLength(1);
-  expect(screen.getAllByText("Unavailable")).toHaveLength(2);
+  expect(screen.getAllByText("Unavailable")).toHaveLength(3);
+  expect(screen.getAllByRole("term").map(term => term.textContent)).toEqual(["Automatic Downloads", "Automatic Processing", "Automatic Download Removal", "Automatically dummy file"]);
   expect(screen.queryByRole("button")).toBeNull();
 });
 

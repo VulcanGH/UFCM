@@ -18,9 +18,10 @@ interface UFCStatusPanelProps {
   automationControl?: ReactNode;
   processingControl?: ReactNode;
   removalControl?: ReactNode;
+  placeholderControl?: ReactNode;
 }
 
-export function UFCStatusPanel({ status, pending, error, autoCopyEnabled, automationControl, processingControl, removalControl }: UFCStatusPanelProps) {
+export function UFCStatusPanel({ status, pending, error, autoCopyEnabled, automationControl, processingControl, removalControl, placeholderControl }: UFCStatusPanelProps) {
   return (
     <fieldset aria-label="Automation Settings" className="space-y-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
       <legend className="px-1 font-medium">Automation Settings</legend>
@@ -39,6 +40,7 @@ export function UFCStatusPanel({ status, pending, error, autoCopyEnabled, automa
               <dd>{processingControl ?? (autoCopyEnabled === undefined ? "Unavailable" : autoCopyEnabled ? "Enabled" : "Disabled")}</dd>
             </div>
             <div className="flex justify-between gap-4 p-3"><dt>Automatic Download Removal</dt><dd>{removalControl ?? "Unavailable"}</dd></div>
+            <div className="flex justify-between gap-4 p-3"><dt>Automatically dummy file</dt><dd>{placeholderControl ?? "Unavailable"}</dd></div>
           </dl>
         </>
       )}
@@ -49,5 +51,5 @@ export function UFCStatusPanel({ status, pending, error, autoCopyEnabled, automa
 export function UFCOverview() {
   const { data, isPending, error } = useQuery(UFCStatusQueryOptions());
   const processing = useQuery({ queryKey: ["ufc", "processing-settings"], queryFn: APIClient.ufc.processingSettings, retry: false });
-  return <UFCStatusPanel status={data} pending={isPending} error={error} autoCopyEnabled={processing.data?.auto_process_completed} automationControl={<UFCAutomationControl />} processingControl={<UFCProcessingAutomationControl field="auto_process_completed" />} removalControl={<UFCProcessingAutomationControl field="cleanup_sab_download" />} />;
+  return <UFCStatusPanel status={data} pending={isPending} error={error} autoCopyEnabled={processing.data?.auto_process_completed} automationControl={<UFCAutomationControl />} processingControl={<UFCProcessingAutomationControl field="auto_process_completed" />} removalControl={<UFCProcessingAutomationControl field="cleanup_sab_download" />} placeholderControl={<UFCProcessingAutomationControl field="plex_placeholder" />} />;
 }

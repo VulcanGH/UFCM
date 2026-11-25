@@ -19,7 +19,7 @@ export function UFCAutomationControl() {
   </div>;
 }
 
-export function UFCProcessingAutomationControl({field}:{field:"auto_process_completed"|"cleanup_sab_download"}) {
+export function UFCProcessingAutomationControl({field}:{field:"auto_process_completed"|"cleanup_sab_download"|"plex_placeholder"}) {
  const client=useQueryClient();
  const settings=useQuery({queryKey:["ufc","processing-settings"],queryFn:APIClient.ufc.processingSettings,retry:false});
  const pending=useIsMutating({mutationKey:["ufc","processing-settings"]})>0;

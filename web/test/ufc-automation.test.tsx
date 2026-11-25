@@ -20,7 +20,7 @@ test("saves directly and labels the saved enabled and disabled states", async ()
   await screen.findByRole("switch", {name:"Disabled"});
 });
 
-test("processing toggle preserves draft configuration and saves only its own flag",async()=>{
+test("dummy file toggle preserves draft configuration and stays enabled after saving the form",async()=>{
  let current:ProcessingSettings={revision:1,source_roots:["X:/downloads"],destination_root:"X:/library",event_folder_template:"event-template",main_file_template:"main",extra_file_template:"extra",component_folder:"Featurettes",conflict_policy:"review",extensions:[".mkv"],max_concurrent:1,max_attempts:3,sab_client_id:1,sab_category:"ufc",auto_process_completed:false,cleanup_sab_download:false,plex_placeholder:false};
  vi.spyOn(APIClient.ufc,"processingSettings").mockImplementation(async()=>current);
  vi.spyOn(APIClient.ufc,"downloadClients").mockResolvedValue([{id:1,name:"Fixture SAB"}]);
@@ -28,11 +28,12 @@ test("processing toggle preserves draft configuration and saves only its own fla
  vi.spyOn(APIClient.ufc,"sabCategories").mockResolvedValue(["ufc"]);
  const save=vi.spyOn(APIClient.ufc,"saveProcessingSettings").mockImplementation(async input=>{current={...input,revision:input.revision+1};return current;});
  const client=new QueryClient({defaultOptions:{queries:{retry:false}}});
- render(<QueryClientProvider client={client}><UFCProcessingSettings/><UFCProcessingAutomationControl field="auto_process_completed"/></QueryClientProvider>);
+ render(<QueryClientProvider client={client}><UFCProcessingSettings/><UFCProcessingAutomationControl field="plex_placeholder"/></QueryClientProvider>);
+ expect(await screen.findByLabelText("Completed download folders", {exact:true})).toBeTruthy();
  const draft=await screen.findByDisplayValue("event-template");fireEvent.change(draft,{target:{value:"my draft"}});
  fireEvent.click(await screen.findByRole("switch",{name:"Disabled"}));await screen.findByRole("switch",{name:"Enabled"});
- expect(save).toHaveBeenCalledWith(expect.objectContaining({revision:1,event_folder_template:"event-template",auto_process_completed:true,cleanup_sab_download:false}));
+ expect(save).toHaveBeenCalledWith(expect.objectContaining({revision:1,event_folder_template:"event-template",auto_process_completed:false,cleanup_sab_download:false,plex_placeholder:true}));
  expect((draft as HTMLInputElement).value).toBe("my draft");
  fireEvent.click(screen.getByRole("button",{name:/save processing settings/i}));
- await waitFor(()=>expect(save).toHaveBeenLastCalledWith(expect.objectContaining({revision:2,event_folder_template:"my draft",auto_process_completed:true,cleanup_sab_download:false})));
+ await waitFor(()=>expect(save).toHaveBeenLastCalledWith(expect.objectContaining({revision:2,event_folder_template:"my draft",auto_process_completed:false,cleanup_sab_download:false,plex_placeholder:true})));
 });
